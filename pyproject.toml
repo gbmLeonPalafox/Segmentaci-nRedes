@@ -1,0 +1,25 @@
+[project]
+name = "video-transcript-studio"
+version = "0.1.0"
+description = "Local video ingestion and timestamped Whisper transcription"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "python-multipart>=0.0.20",
+  "faster-whisper>=1.2,<2",
+  # faster-whisper 1.2.1 uses an av.open argument removed in PyAV 19.
+  "av>=16,<19",
+  "yt-dlp[default]>=2026.3.17",
+  "imageio-ffmpeg>=0.6,<1",
+  "openai>=2,<3",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.11,<1"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110

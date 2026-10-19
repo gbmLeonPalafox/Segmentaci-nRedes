@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#174e41" />
+    <title>Frame — Transcript Studio</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <svg
+      class="icon-defs"
+      aria-hidden="true"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <defs>
+        <symbol id="i-plus" viewBox="0 0 24 24">
+          <path d="M12 5v14M5 12h14" />
+        </symbol>
+        <symbol id="i-video" viewBox="0 0 24 24">
+          <rect x="3" y="5" width="14" height="14" rx="3" />
+          <path d="m17 10 4-3v10l-4-3" />
+        </symbol>
+        <symbol id="i-upload" viewBox="0 0 24 24">
+          <path d="M12 16V3m-5 5 5-5 5 5M4 15v5h16v-5" />
+        </symbol>
+        <symbol id="i-link" viewBox="0 0 24 24">
+          <path
+            d="m10 13 4-4m-6 6-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 2 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"
+            transform="translate(1 1)"
+          />
+        </symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24">
+          <path d="M4 12h16m-6-6 6 6-6 6" />
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24">
+          <circle cx="10" cy="10" r="6" />
+          <path d="m15 15 5 5" />
+        </symbol>
+        <symbol id="i-download" viewBox="0 0 24 24">
+          <path d="M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4" />
+        </symbol>
+        <symbol id="i-check" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6" />
+        </symbol>
+        <symbol id="i-text" viewBox="0 0 24 24">
+          <path d="M5 4h14M12 4v16m-4 0h8" />
+        </symbol>
+      </defs>
+    </svg>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Frame home"
+        ><span class="brand-mark"><i></i><i></i><i></i></span>frame<span
+          class="brand-dot"
+          >.</span
+        ></a
+      >
+      <div class="studio-label">YOUR TRANSCRIPT STUDIO</div>
+      <button class="new-button" id="new-video">
+        <svg><use href="#i-plus" /></svg> New transcript <span>↗</span>
+      </button>
+      <div class="library-label">LIBRARY <span id="library-count">0</span></div>
+      <nav id="job-list" aria-label="Video library">
+        <p class="library-empty">
+          Your videos will appear here.<br />Start with something worth hearing.
+        </p>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="status-dot"></span>
+        <div>
+          Runs on your machine<small>Local Whisper transcription</small>
+        </div>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <span class="breadcrumb">Workspace</span><span class="slash">/</span
+          ><span>Transcripts</span>
+        </div>
+        <span class="local-badge"
+          ><span class="status-dot"></span> Local workspace</span
+        >
+      </header>
+      <div class="page">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">FROM VIDEO TO WORDS</div>
+            <h1>Your video. Every word.</h1>
+            <p>A searchable transcript, with the moments attached.</p>
+          </div>
+          <span class="version-tag">WHISPER POWERED</span>
+        </div>
+        <ol class="workflow" aria-label="Processing stages">
+          <li data-step="acquire">
+            <span class="step-number">1</span
+            ><span>Import video<small>Upload or YouTube</small></span>
+          </li>
+          <li data-step="audio">
+            <span class="step-number">2</span
+            ><span>Extract audio<small>Prepare for listening</small></span>
+          </li>
+          <li data-step="transcribe">
+            <span class="step-number">3</span
+            ><span>Transcribe<small>Whisper, locally</small></span>
+          </li>
+          <li data-step="complete">
+            <span class="step-number">4</span
+            ><span>Your transcript<small>Read, search & export</small></span>
+          </li>
+        </ol>
+
+        <section id="import-view" class="import-layout">
+          <div class="import-card">
+            <div class="section-title">
+              <span class="mini-icon"
+                ><svg><use href="#i-video" /></svg
+              ></span>
+              <div>
+                <h2>Start with a video</h2>
+                <p>Choose how you’d like to bring it in.</p>
+              </div>
+            </div>
+            <div class="source-tabs" role="tablist" aria-label="Video source">
+              <button
+                id="tab-upload"
+                role="tab"
+                aria-selected="true"
+                aria-controls="panel-upload"
+              >
+                <svg><use href="#i-upload" /></svg> Upload file</button
+              ><button
+                id="tab-youtube"
+                role="tab"
+                aria-selected="false"
+                aria-controls="panel-youtube"
+              >
+                <svg><use href="#i-link" /></svg> YouTube link
+              </button>
+            </div>
+            <form id="import-form">
+              <div
+                id="panel-upload"
+                role="tabpanel"
+                aria-labelledby="tab-upload"
+              >
+                <label
+                  class="dropzone"
+                  id="dropzone"
+                  tabindex="0"
+                  role="button"
+                  aria-label="Choose a video file"
+                >
+                  <input
+                    type="file"
+                    id="video-file"
+                    accept=".mp4,.mov,.mkv,.webm,.avi,.m4v,.mpeg,.mpg,.mts"
+                    hidden
+                  />
+                  <span class="upload-symbol"
+                    ><svg><use href="#i-upload" /></svg
+                  ></span>
+                  <strong id="file-title">Drop your video here</strong
+                  ><span id="file-description"
+                    >or <u>browse files</u> to get started</span
+                  ><small>MP4, MOV, MKV, WebM & more · Up to 2 GB</small>
+                </label>
+              </div>
+              <div
+                id="panel-youtube"
+                role="tabpanel"
+                aria-labelledby="tab-youtube"
+                hidden
+              >
+                <label class="field-label" for="youtube-url"
+                  >YouTube video URL</label
+                >
+                <div class="url-field">
+                  <svg><use href="#i-link" /></svg
+                  ><input
+                    id="youtube-url"
+                    type="url"
+                    placeholder="https://www.youtube.com/watch?v=…"
+                    autocomplete="off"
+                  />
+                </div>
+                <p class="field-hint">
+                  Paste a single video or Short. We’ll download its video and
+                  audio.
+                </p>
+                <div class="youtube-note">
+                  The downloaded resolution is preserved. Live streams and
+                  playlists aren’t supported.
+                </div>
+              </div>
+              <div class="options-grid">
+                <label class="field-label" for="model"
+                  >Whisper model<select id="model">
+                    <option value="tiny">Tiny · fastest</option>
+                    <option value="base" selected>Base · balanced</option>
+                    <option value="small">Small · more accurate</option>
+                    <option value="medium">Medium · slower</option>
+                    <option value="large-v3">Large v3 · most accurate</option>
+                    <option value="turbo">Turbo · larger model</option>
+                  </select></label
+                ><label class="field-label" for="language"
+                  >Spoken language<select id="language">
+                    <option value="">Auto-detect</option>
+                    <option value="en">English</option>
+                    <option value="es">Spanish</option>
+                    <option value="fr">French</option>
+                    <option value="de">German</option>
+                    <option value="pt">Portuguese</option>
+                    <option value="it">Italian</option>
+                    <option value="ja">Japanese</option>
+                    <option value="zh">Chinese</option>
+                    <option value="ko">Korean</option>
+                    <option value="hi">Hindi</option>
+                    <option value="ar">Arabic</option>
+                  </select></label
+                >
+              </div>
+              <p class="model-note">
+                First use downloads the selected model. Larger models need more
+                time and memory.
+              </p>
+              <div
+                id="form-error"
+                class="error-message"
+                role="alert"
+                hidden
+              ></div>
+              <button type="submit" class="primary-button" id="submit-button">
+                <span>Create transcript</span><svg><use href="#i-arrow" /></svg>
+              </button>
+              <p class="privacy-note">
+                Transcription runs locally. No API key required.
+              </p>
+            </form>
+          </div>
+          <aside class="intro-panel">
+            <span class="intro-label">LESS SCRUBBING. MORE FINDING.</span>
+            <div class="wave-art" aria-hidden="true">
+              <div class="wave-line"></div>
+              <div class="wave-bars" id="wave-bars"></div>
+              <span class="wave-cursor"></span
+              ><span class="wave-time">00:24</span>
+            </div>
+            <h2>Give your footage<br />a readable side.</h2>
+            <p>
+              Turn conversations, interviews, and long recordings into words you
+              can actually work with.
+            </p>
+            <div class="feature">
+              <span>01</span>
+              <div>
+                <strong>Every word has a place</strong>
+                <p>Timestamped segments linked to your video.</p>
+              </div>
+            </div>
+            <div class="feature">
+              <span>02</span>
+              <div>
+                <strong>Find the part you remember</strong>
+                <p>Search the transcript. Jump to the moment.</p>
+              </div>
+            </div>
+            <div class="feature">
+              <span>03</span>
+              <div>
+                <strong>Take your words with you</strong>
+                <p>Export as text, subtitles, JSON, or HTML.</p>
+              </div>
+            </div>
+            <div class="scope-note">
+              <svg><use href="#i-text" /></svg
+              ><span
+                >Local transcription first.<br />Find the strongest passages
+                with an LLM.</span
+              >
+            </div>
+          </aside>
+        </section>
+
+        <section id="workspace-view" hidden>
+          <div class="workspace-title">
+            <div>
+              <span class="eyebrow" id="source-label">YOUR VIDEO</span>
+              <h2 id="video-title"></h2>
+              <p id="video-meta"></p>
+            </div>
+            <div class="workspace-actions">
+              <button
+                id="delete-video"
+                class="delete-video-button"
+                type="button"
+              >
+                Delete video
+              </button>
+              <details class="export-menu" id="export-menu" hidden>
+                <summary>
+                  <svg><use href="#i-download" /></svg> Export transcript
+                  <span>⌄</span>
+                </summary>
+                <div id="export-links">
+                  <a data-format="txt">Plain text <span>.txt</span></a
+                  ><a data-format="srt">Subtitles <span>.srt</span></a
+                  ><a data-format="json">Timestamped data <span>.json</span></a
+                  ><a data-format="html">Readable report <span>.html</span></a>
+                </div>
+              </details>
+            </div>
+          </div>
+          <div class="video-storage-line">
+            <span id="video-storage"></span
+            ><span id="delete-availability"></span>
+          </div>
+          <div id="progress-card" class="progress-card" aria-live="polite">
+            <div class="progress-top">
+              <div>
+                <span class="processing-spinner" id="processing-spinner"></span
+                ><strong id="progress-title">Preparing your video</strong>
+              </div>
+              <span id="progress-percent"></span>
+            </div>
+            <div
+              class="progress-track"
+              role="progressbar"
+              aria-label="Processing progress"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              id="progress-track"
+            >
+              <div id="progress-fill"></div>
+            </div>
+            <p id="progress-message"></p>
+            <div id="job-error" class="error-message" hidden></div>
+            <button id="retry-button" class="secondary-button" hidden>
+              Try again
+            </button>
+          </div>
+          <div class="editor-layout">
+            <div class="media-column">
+              <div class="media-box">
+                <video
+                  id="video-player"
+                  controls
+                  preload="metadata"
+                  hidden
+                ></video>
+                <div id="media-placeholder">
+                  <span class="video-placeholder-icon"
+                    ><svg><use href="#i-video" /></svg
+                  ></span>
+                  <p>Your video will appear here</p>
+                  <small>Once it’s ready for preview</small>
+                </div>
+              </div>
+              <div class="media-caption">
+                <svg><use href="#i-video" /></svg
+                ><span>Original dimensions preserved</span
+                ><span id="resolution-label"></span>
+              </div>
+              <div class="about-transcript">
+                <span class="small-eyebrow">A NOTE ON TRANSCRIPTS</span>
+                <p>
+                  Whisper can miss words or mishear names. Use the video to
+                  review important passages.
+                </p>
+              </div>
+            </div>
+            <div class="transcript-card">
+              <div class="transcript-header">
+                <h3>Transcript <span id="segment-count"></span></h3>
+                <span id="language-badge"></span>
+              </div>
+              <div class="search-wrap">
+                <svg><use href="#i-search" /></svg
+                ><input
+                  id="transcript-search"
+                  type="search"
+                  placeholder="Search the transcript…"
+                  aria-label="Search transcript"
+                  disabled
+                /><span id="search-count"></span>
+              </div>
+              <div class="transcript-toolbar">
+                <span>TIME / TRANSCRIPT</span
+                ><label
+                  ><input type="checkbox" id="follow-playback" /> Follow
+                  playback</label
+                >
+              </div>
+              <div id="transcript-segments" class="transcript-segments">
+                <div class="transcript-empty">
+                  <span class="empty-text-icon"
+                    ><svg><use href="#i-text" /></svg
+                  ></span>
+                  <h3>The words are on their way</h3>
+                  <p>
+                    Your timestamped transcript will appear here<br />when
+                    Whisper finishes listening.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <section
+            id="highlights-section"
+            class="highlights-section"
+            hidden
+            aria-labelledby="highlights-heading"
+          >
+            <div class="highlights-heading-row">
+              <div>
+                <span class="eyebrow">THE MOMENTS THAT MATTER</span>
+                <h2 id="highlights-heading">Find the important parts.</h2>
+                <p>Choose complete, useful passages from your transcript.</p>
+              </div>
+              <span id="llm-model-badge" class="llm-model-badge"></span>
+            </div>
+            <div class="highlights-controls">
+              <div
+                id="llm-config-notice"
+                class="llm-config-notice"
+                role="status"
+              ></div>
+              <form id="highlights-form">
+                <div class="highlight-options">
+                  <label for="highlight-count"
+                    >Up to<input
+                      id="highlight-count"
+                      type="number"
+                      min="1"
+                      max="15"
+                      value="5"
+                      required
+                    /><span>highlights</span></label
+                  >
+                  <label for="highlight-min"
+                    >Minimum<input
+                      id="highlight-min"
+                      type="number"
+                      min="1"
+                      max="300"
+                      value="20"
+                      required
+                    /><span>seconds</span></label
+                  >
+                  <label for="highlight-max"
+                    >Maximum<input
+                      id="highlight-max"
+                      type="number"
+                      min="5"
+                      max="600"
+                      value="90"
+                      required
+                    /><span>seconds</span></label
+                  >
+                </div>
+                <label class="highlight-objective" for="highlight-objective"
+                  >What should we look for?<textarea
+                    id="highlight-objective"
+                    rows="3"
+                    minlength="10"
+                    maxlength="2000"
+                    required
+                  ></textarea>
+                </label>
+                <div class="highlight-action-row">
+                  <p>
+                    Transcript text is sent to OpenAI when you generate
+                    highlights. Video and audio stay local.
+                  </p>
+                  <button
+                    class="primary-button"
+                    id="generate-highlights"
+                    type="submit"
+                  >
+                    Generate highlights <svg><use href="#i-arrow" /></svg>
+                  </button>
+                </div>
+              </form>
+              <div
+                id="highlight-progress"
+                class="highlight-progress"
+                role="status"
+                hidden
+              >
+                <span class="processing-spinner"></span
+                ><span id="highlight-progress-message"></span>
+              </div>
+              <div
+                id="highlight-error"
+                class="error-message"
+                role="alert"
+                hidden
+              ></div>
+            </div>
+            <div id="highlight-results" hidden>
+              <div class="highlight-results-header">
+                <div>
+                  <h3 id="highlight-results-title">Selected passages</h3>
+                  <p id="highlight-result-meta"></p>
+                </div>
+                <div class="highlight-exports">
+                  <a id="highlight-export-html"
+                    >Export HTML <svg><use href="#i-download" /></svg></a
+                  ><a id="highlight-export-json">JSON</a>
+                </div>
+              </div>
+              <p id="highlight-summary" class="highlight-summary"></p>
+              <div class="clip-controls">
+                <div>
+                  <h3>Turn these passages into clips</h3>
+                  <p>
+                    MP4 exports at the original dimensions. No cropping or
+                    resizing.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  id="generate-clips"
+                  class="primary-button"
+                >
+                  Generate clips <svg><use href="#i-video" /></svg>
+                </button>
+              </div>
+              <div
+                id="clip-progress"
+                class="highlight-progress"
+                role="status"
+                hidden
+              >
+                <span class="processing-spinner"></span
+                ><span id="clip-progress-message"></span>
+              </div>
+              <div
+                id="clip-error"
+                class="error-message"
+                role="alert"
+                hidden
+              ></div>
+              <p id="clip-ready-summary" class="clip-ready-summary" hidden></p>
+              <div id="highlight-cards" class="highlight-cards"></div>
+            </div>
+          </section>
+        </section>
+        <footer>
+          <span>Made for the moments worth returning to.</span
+          ><span>VIDEO → WORDS → HIGHLIGHTS</span>
+        </footer>
+      </div>
+    </main>
+    <dialog id="delete-dialog" aria-labelledby="delete-dialog-title">
+      <h2 id="delete-dialog-title">Delete this video?</h2>
+      <p id="delete-dialog-name"></p>
+      <p>
+        This permanently removes the source video, preview, transcript,
+        highlights, and all generated clips from this workspace.
+      </p>
+      <p id="delete-dialog-size"></p>
+      <div id="delete-error" class="error-message" role="alert" hidden></div>
+      <div class="delete-dialog-actions">
+        <button
+          type="button"
+          id="cancel-delete"
+          class="secondary-button"
+          autofocus
+        >
+          Keep video</button
+        ><button type="button" id="confirm-delete" class="danger-button">
+          Delete video and files
+        </button>
+      </div>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+  </body>
+</html>
