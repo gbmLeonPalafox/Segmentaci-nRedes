@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -43,9 +44,9 @@ def validate_ranges(highlights, duration):
     return items
 
 
-def render_clip(source, destination, start, end, metadata, mode="original", detector=None):
+def render_clip(source, destination, start, end, metadata, mode="original", detector=None, words=None):
     expected = (metadata["width"], metadata["height"])
-    filters, framing = [], {"mode": "original"}
+    expression, framing = "", {"mode": "original"}
     commands_file = destination.with_suffix(".crop.cmd")
     if mode != "original":
         from app.reframing import plan_reframe
@@ -53,7 +54,16 @@ def render_clip(source, destination, start, end, metadata, mode="original", dete
         expression, expected, framing = plan_reframe(
             source, start, end, metadata, mode, commands_file, detector
         )
-        filters = ["-vf", expression]
+    captions = {"mode": "off"}
+    if words is not None:
+        from app.captions import write_ass
+
+        subtitle_file = destination.with_suffix(".ass")
+        captions = write_ass(subtitle_file, words, start, end, *expected)
+        # Apply after all crop/stack/scale operations, in clip-relative time.
+        expression = (expression + "," if expression else "setpts=PTS-STARTPTS,")
+        expression += f"ass={subtitle_file.name}"
+    filters = ["-vf", expression] if expression else []
     pixel_format = "yuv444p" if expected[0] % 2 or expected[1] % 2 else "yuv420p"
     result = subprocess.run(
         [
@@ -99,7 +109,9 @@ def render_clip(source, destination, start, end, metadata, mode="original", dete
     )
     commands_file.unlink(missing_ok=True)
     if result.returncode:
-        raise ValueError("FFmpeg could not render this clip. Check that the original video is readable.")
+        raise ValueError(
+            "FFmpeg could not render this clip. Check the source video and, for subtitles, libass support."
+        )
     rendered = inspect_media(destination)
     if (rendered["width"], rendered["height"]) != expected:
         raise ValueError("Rendered dimensions differ from the requested clip format.")
@@ -112,14 +124,14 @@ def render_clip(source, destination, start, end, metadata, mode="original", dete
     with av.open(str(destination)) as container:
         if next(container.decode(video=0), None) is None:
             raise ValueError("The rendered clip contains no readable video frames.")
-    return {**rendered, "framing": framing}
+    return {**rendered, "framing": framing, "captions": captions}
 
 
 class ClipRunner:
     def __init__(self, store):
         self.store = store
 
-    def run(self, job_id):
+    def run(self, job_id, clip_id=None):
         folder = self.store.root / job_id
         revision = uuid.uuid4().hex
         staging, published = folder / f".clips-{revision}", folder / f"clips-{revision}"
@@ -132,7 +144,14 @@ class ClipRunner:
                 clips_message="Inspecting the original video…",
             )
             job = self.store.get(job_id)
-            mode = job.get("clips_mode", "original")
+            previous = json.loads((folder / "clips.json").read_text()) if clip_id else None
+            mode = previous["mode"] if previous else job.get("clips_mode", "original")
+            subtitles = previous.get("subtitles", False) if previous else job.get("clips_subtitles", False)
+            words = None
+            if subtitles:
+                from app.captions import caption_words
+
+                words = caption_words(json.loads((folder / "transcript.json").read_text()))
             detector = None
             if mode == "face_follow":
                 from app.reframing import FaceDetector
@@ -142,13 +161,28 @@ class ClipRunner:
             metadata = inspect_media(source)
             highlights = json.loads((folder / "highlights.json").read_text())
             items = validate_ranges(highlights, metadata["duration"])
+            if previous and previous["highlights_sha256"] != highlight_hash(highlights):
+                raise ValueError("Highlights have changed. Generate all clips again.")
             staging.mkdir()
             clips = []
             for index, item in enumerate(items):
+                if previous and item["id"] != clip_id:
+                    saved = next(c for c in previous["clips"] if c["id"] == item["id"])
+                    # Reuse the exact files without encoding or duplicating their data.
+                    # The old batch remains intact until the new manifest is published.
+                    for suffix in (".mp4", ".ass"):
+                        old_file = folder / previous["directory"] / (item["id"] + suffix)
+                        if old_file.exists():
+                            os.link(old_file, staging / old_file.name)
+                        elif suffix == ".mp4":
+                            raise ValueError("A previous clip is missing. Generate all clips again.")
+                    clips.append({**saved, "revision": saved.get("revision", previous["revision"])})
+                    continue
                 self.store.update(
                     job_id,
                     clips_progress=round(5 + 90 * index / len(items)),
                     clips_message=(
+                        f"Regenerating clip {item['rank']}…" if clip_id else
                         f"Following the face and rendering clip {index + 1} of {len(items)}…"
                         if mode == "face_follow"
                         else f"Rendering clip {index + 1} of {len(items)}…"
@@ -156,10 +190,20 @@ class ClipRunner:
                 )
                 filename = f"{item['id']}.mp4"
                 target = staging / filename
-                output = render_clip(source, target, item["start"], item["end"], metadata, mode, detector)
+                args = (source, target, item["start"], item["end"], metadata, mode, detector)
+                caption_revision = None
+                if subtitles:
+                    from app.caption_edits import corrected_words, editor_document
+
+                    document = editor_document(folder, item["id"], item["start"], item["end"], words)
+                    output = render_clip(*args, corrected_words(document))
+                    caption_revision = document["revision"]
+                else:
+                    output = render_clip(*args)
                 clips.append(
                     {
                         "id": item["id"],
+                        "revision": revision,
                         "rank": item["rank"],
                         "title": item["title"],
                         "source_start": item["start"],
@@ -170,11 +214,14 @@ class ClipRunner:
                         "size_bytes": target.stat().st_size,
                         "filename": filename,
                         "framing": output["framing"],
+                        "captions": output.get("captions", {"mode": "off"}),
+                        "captions_revision": caption_revision,
                     }
                 )
             result = {
-                "version": 2,
+                "version": 4,
                 "mode": mode,
+                "subtitles": subtitles,
                 "job_id": job_id,
                 "revision": revision,
                 "created_at": datetime.now(UTC).isoformat(),
@@ -197,6 +244,7 @@ class ClipRunner:
                 clips_message="Clips ready.",
                 clips_count=len(clips),
                 clips_revision=revision,
+                clips_target_id=None,
             )
         except Exception as exc:  # noqa: BLE001 -- Keep failures within the background job.
             logger.warning("Clip job %s failed (%s)", job_id, type(exc).__name__)
@@ -210,7 +258,10 @@ class ClipRunner:
                 shutil.rmtree(published, ignore_errors=True)
             self.store.update(
                 job_id,
-                clips_status="failed",
+                clips_status="completed" if clip_id and current_directory else "failed",
+                clips_target_id=None,
+                **({"clips_revision": json.loads((folder / "clips.json").read_text())["revision"]}
+                   if clip_id and current_directory else {}),
                 clips_message="Clip rendering stopped.",
                 clips_error=str(exc)
                 if isinstance(exc, ValueError)

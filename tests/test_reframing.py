@@ -160,7 +160,8 @@ class TwoFaceDetector:
 
 
 @pytest.mark.parametrize("pixel_format", ["yuv420p", "yuv420p10le"])
-def test_render_splits_only_two_person_interval_then_reframes_remaining_face(tmp_path, pixel_format):
+@pytest.mark.parametrize("subtitles", [False, True])
+def test_render_splits_only_two_person_interval_then_reframes_remaining_face(tmp_path, pixel_format, subtitles):
     silent = tmp_path / "two-people.mp4"
     with av.open(str(silent), "w") as container:
         stream = container.add_stream("libx264", rate=24)
@@ -198,7 +199,10 @@ def test_render_splits_only_two_person_interval_then_reframes_remaining_face(tmp
         check=True,
     )
     destination = tmp_path / "mixed-layout.mp4"
-    rendered = render_clip(source, destination, 0, 4, inspect_media(source), "face_follow", TwoFaceDetector())
+    words = [{"word": "Subtitles", "start": 1.2, "end": 2.8}] if subtitles else None
+    rendered = render_clip(
+        source, destination, 0, 4, inspect_media(source), "face_follow", TwoFaceDetector(), words
+    )
     assert rendered["framing"]["split_screen_ranges"] == [{"start": 1, "end": 3}]
     assert rendered["audio_codec"] == "aac"
     assert rendered["duration"] == pytest.approx(4, abs=0.1)
@@ -208,6 +212,10 @@ def test_render_splits_only_two_person_interval_then_reframes_remaining_face(tmp
             red = (rgb[:, :, 0] > 160) & (rgb[:, :, 2] < 80)
             blue = (rgb[:, :, 2] > 160) & (rgb[:, :, 0] < 80)
             midpoint = rgb.shape[0] // 2
+            if subtitles and 1.3 <= frame.time < 2.8:
+                white = np.all(rgb > 170, axis=2)
+                assert white[midpoint:].sum() > 20
+                assert white[:midpoint].sum() == 0
             if 1 <= frame.time < 3:
                 assert red[:midpoint].sum() > 2000
                 assert blue[midpoint:].sum() > 2000

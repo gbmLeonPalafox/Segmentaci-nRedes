@@ -828,7 +828,7 @@ function resetClips() {
   $("clip-progress").hidden = true;
   $("clip-ready-summary").hidden = true;
   for (const element of document.querySelectorAll(
-    ".clip-preview, .clip-download, .clip-file-info",
+    ".clip-preview, .clip-download, .clip-file-info, .clip-regenerate, .clip-edit-subtitles, .clip-caption-note",
   )) {
     if (element.tagName === "VIDEO") {
       element.pause();
@@ -842,9 +842,11 @@ function renderClipState(job) {
   if (job.id !== state.active) return;
   const busy = ["queued", "running"].includes(job.clips_status);
   $("clip-mode").disabled = busy;
+  $("clip-subtitles").disabled = busy;
   if ($("clip-mode").dataset.job !== job.id) {
     $("clip-mode").dataset.job = job.id;
     $("clip-mode").value = job.clips_mode || "face_follow";
+    $("clip-subtitles").checked = job.clips_subtitles || false;
     updateClipFormatHelp();
   }
   $("generate-clips").disabled =
@@ -859,14 +861,20 @@ function renderClipState(job) {
   $("clip-progress").hidden = !busy;
   $("clip-progress-message").textContent =
     `${job.clips_message || "Queued…"} ${busy ? `${job.clips_progress || 0}%` : ""}`;
-  $("clip-error").hidden = job.clips_status !== "failed";
+  $("clip-error").hidden = !job.clips_error;
   $("clip-error").textContent = job.clips_error || "";
   if (job.clips_status === "stale" || job.highlights_status !== "completed") {
     if (clipData) resetClips();
     return;
   }
   const key = `${job.id}:${job.clips_revision || ""}`;
-  if (job.clips_status === "completed" && clipLoadKey !== key)
+  for (const button of document.querySelectorAll(".clip-regenerate")) {
+    button.disabled = busy;
+    button.textContent = busy && button.dataset.clipId === job.clips_target_id
+      ? "Regenerating this clip…" : "Regenerate this clip";
+  }
+  for (const button of document.querySelectorAll(".clip-edit-subtitles")) button.disabled = busy;
+  if ((job.clips_status === "completed" || (busy && job.clips_target_id)) && clipLoadKey !== key)
     loadClips(job, key);
 }
 async function loadClips(job, key) {
@@ -891,10 +899,21 @@ function attachClipPreviews() {
   const total = clipData.clips.reduce((sum, item) => sum + item.size_bytes, 0);
   const format = { original: "original dimensions", center_crop: "vertical · center crop", face_follow: "vertical · face follow" }[clipData.mode || "original"];
   $("clip-ready-summary").textContent =
-    `${clipData.clips.length} MP4 clips ready · ${bytesLabel(total)} · ${format}`;
+    `${clipData.clips.length} MP4 clips ready · ${bytesLabel(total)} · ${format} · ${clipData.subtitles ? "Dynamic subtitles" : "No subtitles"}`;
   for (const item of clipData.clips) {
     const card = document.querySelector(`[data-highlight-id="${item.id}"]`);
-    if (!card || card.querySelector(".clip-preview")) continue;
+    if (!card) continue;
+    const revision = item.revision || clipData.revision;
+    const existing = card.querySelector(".clip-preview");
+    let note = card.querySelector(".clip-caption-note");
+    if (!note) { note = document.createElement("p"); note.className = "clip-caption-note"; card.append(note); }
+    note.textContent = item.subtitle_edits_pending ? "Subtitle corrections saved. Regenerate this clip to apply them." : "";
+    note.hidden = !item.subtitle_edits_pending;
+    if (existing?.dataset.revision === revision) continue;
+    for (const element of card.querySelectorAll(".clip-preview, .clip-file-info, .clip-download, .clip-regenerate, .clip-edit-subtitles")) {
+      if (element.tagName === "VIDEO") { element.pause(); element.removeAttribute("src"); element.load(); }
+      element.remove();
+    }
     const video = document.createElement("video");
     video.className = "clip-preview";
     if (item.height > item.width) video.classList.add("vertical");
@@ -903,7 +922,8 @@ function attachClipPreviews() {
     video.preload = "metadata";
     video.setAttribute("aria-label", `Clip ${item.rank}: ${item.title}`);
     const url = `/api/jobs/${clipData.job_id}/clips/${item.id}/media`;
-    video.src = `${url}?revision=${clipData.revision}`;
+    video.dataset.revision = revision;
+    video.src = `${url}?revision=${revision}`;
     video.addEventListener("error", () =>
       notify(
         "This clip could not play. Try downloading it or generating clips again.",
@@ -915,12 +935,174 @@ function attachClipPreviews() {
     if (item.framing?.fallback === "center_crop") info.textContent += " · No face found; centered crop";
     const download = document.createElement("a");
     download.className = "clip-download";
-    download.href = `${url}?download=true&revision=${clipData.revision}`;
+    download.href = `${url}?download=true&revision=${revision}`;
     download.textContent = `Download clip ${item.rank} · MP4`;
     download.setAttribute("download", "");
-    card.append(video, info, download);
+    const regenerate = document.createElement("button");
+    regenerate.type = "button";
+    regenerate.className = "clip-regenerate";
+    regenerate.dataset.clipId = item.id;
+    regenerate.textContent = "Regenerate this clip";
+    regenerate.title = "Reuses this batch’s format and subtitle settings. Other clips stay unchanged.";
+    regenerate.disabled = ["queued", "running"].includes(state.jobs.find(j => j.id === state.active)?.clips_status);
+    regenerate.addEventListener("click", () => regenerateOneClip(item.id));
+    card.append(video, info, download, regenerate);
+    if (clipData.subtitles) {
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "clip-edit-subtitles";
+      edit.textContent = "Edit subtitles";
+      edit.disabled = regenerate.disabled;
+      edit.addEventListener("click", () => openSubtitleEditor(item));
+      card.append(edit);
+    }
   }
 }
+async function regenerateOneClip(clipId) {
+  const id = state.active, version = loadVersion;
+  for (const button of document.querySelectorAll(".clip-regenerate")) button.disabled = true;
+  $("generate-clips").disabled = true;
+  try {
+    const job = await api(`/api/jobs/${id}/clips/${clipId}/regenerate`, { method: "POST" });
+    if (version !== loadVersion) return;
+    state.jobs = state.jobs.map(j => j.id === id ? job : j);
+    renderJob(job);
+    return true;
+  } catch (e) {
+    if (version !== loadVersion) return;
+    renderClipState(state.jobs.find(j => j.id === id));
+    $("clip-error").textContent = e.message;
+    $("clip-error").hidden = false;
+    return false;
+  }
+}
+
+let subtitleEditor = null;
+let subtitleSaving = false;
+
+async function openSubtitleEditor(item) {
+  const id = state.active, version = loadVersion;
+  try {
+    const document = await api(`/api/jobs/${id}/clips/${item.id}/subtitles`);
+    if (version !== loadVersion) return;
+    subtitleEditor = { id, clipId: item.id, start: item.source_start, version, document };
+    $("subtitle-editor-name").textContent = document.title;
+    $("subtitle-editor-error").hidden = true;
+    $("subtitle-editor-status").textContent = document.pending
+      ? "Saved corrections are waiting for regeneration. The preview still shows the current MP4."
+      : "The preview shows the current MP4. Save and regenerate to apply your changes.";
+    const words = $("subtitle-editor-words");
+    words.replaceChildren();
+    document.words.forEach((word, index) => {
+      if (index) words.append(window.document.createTextNode(" "));
+      const input = window.document.createElement("span");
+      input.className = "subtitle-edit-word";
+      input.id = `subtitle-word-${index}`;
+      input.contentEditable = "plaintext-only";
+      input.setAttribute("role", "textbox");
+      input.setAttribute("aria-label", `Word ${index + 1}: ${word.word}`);
+      input.setAttribute("aria-multiline", "false");
+      input.tabIndex = 0;
+      input.spellcheck = true;
+      input.lang = "es";
+      input.textContent = word.text;
+      input.classList.toggle("corrected", word.text !== word.word);
+      input.classList.toggle("removed", !word.text.trim());
+      input.addEventListener("focus", () => {
+        subtitleEditor.selectedIndex = index;
+        const relative = Math.max(0, word.start - item.source_start);
+        $("subtitle-editor-word-help").textContent = `Original: ${word.word} · ${formatTime(relative)}.${String(Math.floor((relative % 1) * 100)).padStart(2, "0")}`;
+      });
+      input.addEventListener("keydown", event => {
+        if (event.key === "Enter") event.preventDefault();
+      });
+      input.addEventListener("input", () => {
+        input.classList.toggle("corrected", input.textContent.trim() !== word.word);
+        input.classList.toggle("removed", !input.textContent.trim());
+        $("subtitle-editor-status").textContent = "Unsaved changes. Save and regenerate to update the MP4.";
+      });
+      words.append(input);
+    });
+    $("subtitle-editor-word-help").textContent = "Select a word to see its original spelling or listen to it.";
+    $("subtitle-editor-video").src = `/api/jobs/${id}/clips/${item.id}/media?revision=${item.revision || clipData.revision}`;
+    $("subtitle-editor").showModal();
+  } catch (e) { notify(e.message); }
+}
+
+function closeSubtitleEditor() {
+  $("subtitle-editor-video").pause();
+  $("subtitle-editor-video").removeAttribute("src");
+  $("subtitle-editor-video").load();
+  $("subtitle-editor").close();
+  subtitleEditor = null;
+}
+$("subtitle-editor-close").addEventListener("click", closeSubtitleEditor);
+$("subtitle-editor-play-word").addEventListener("click", () => {
+  if (!subtitleEditor) return;
+  const word = subtitleEditor.document.words[subtitleEditor.selectedIndex || 0];
+  const video = $("subtitle-editor-video");
+  video.currentTime = Math.max(0, word.start - subtitleEditor.start);
+  video.play().catch(() => {});
+});
+$("subtitle-editor").addEventListener("cancel", e => {
+  e.preventDefault();
+  if (!subtitleSaving) closeSubtitleEditor();
+});
+$("subtitle-editor-restore").addEventListener("click", () => {
+  const inputs = $("subtitle-editor-words").querySelectorAll(".subtitle-edit-word");
+  inputs.forEach((input, index) => {
+    input.textContent = subtitleEditor.document.words[index].word;
+    input.classList.remove("corrected");
+    input.classList.remove("removed");
+  });
+  $("subtitle-editor-status").textContent = "Original text restored in the editor. Save to keep this change.";
+});
+async function saveSubtitleEditor(regenerate) {
+  const editor = subtitleEditor;
+  if (!editor || subtitleSaving || editor.version !== loadVersion) return;
+  const inputs = [...$("subtitle-editor-words").querySelectorAll(".subtitle-edit-word")];
+  const invalid = inputs.find(input => input.textContent.trim().length > 120);
+  if (invalid) {
+    $("subtitle-editor-error").textContent = "Each correction can contain at most 120 characters.";
+    $("subtitle-editor-error").hidden = false;
+    invalid.focus();
+    return;
+  }
+  if (!inputs.some(input => input.textContent.trim())) {
+    $("subtitle-editor-error").textContent = "Keep at least one subtitle word. Leave individual words empty to remove them.";
+    $("subtitle-editor-error").hidden = false;
+    return;
+  }
+  subtitleSaving = true;
+  $("subtitle-editor-error").hidden = true;
+  for (const element of $("subtitle-editor").querySelectorAll("button")) element.disabled = true;
+  for (const input of inputs) input.contentEditable = "false";
+  try {
+    const document = await api(`/api/jobs/${editor.id}/clips/${editor.clipId}/subtitles`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision: editor.document.revision, texts: inputs.map(input => input.textContent) }),
+    });
+    editor.document = document;
+    $("subtitle-editor-status").textContent = document.pending
+      ? "Corrections saved. Regenerate this clip to apply them to the MP4." : "Corrections saved.";
+    const job = state.jobs.find(j => j.id === editor.id);
+    if (editor.version === loadVersion) await loadClips(job, `${job.id}:${job.clips_revision || ""}`);
+    if (regenerate) {
+      $("subtitle-editor-video").pause();
+      if (await regenerateOneClip(editor.clipId)) closeSubtitleEditor();
+      else throw new Error("Corrections were saved, but regeneration could not start. Close the editor and retry.");
+    }
+  } catch (e) {
+    $("subtitle-editor-error").textContent = e.message;
+    $("subtitle-editor-error").hidden = false;
+  } finally {
+    subtitleSaving = false;
+    for (const element of $("subtitle-editor").querySelectorAll("button")) element.disabled = false;
+    for (const input of inputs) input.contentEditable = "plaintext-only";
+  }
+}
+$("subtitle-editor-save").addEventListener("click", () => saveSubtitleEditor(false));
+$("subtitle-editor-render").addEventListener("click", () => saveSubtitleEditor(true));
 function updateClipFormatHelp() {
   $("clip-format-help").textContent = {
     face_follow: "Gently follows one person; stacks two people only while both are on screen.",
@@ -937,7 +1119,7 @@ $("generate-clips").addEventListener("click", async () => {
     const job = await api(`/api/jobs/${id}/clips`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: $("clip-mode").value }),
+      body: JSON.stringify({ mode: $("clip-mode").value, subtitles: $("clip-subtitles").checked }),
     });
     if (version !== loadVersion) return;
     resetClips();

@@ -517,6 +517,12 @@
                     <option value="center_crop">Vertical · Center crop (9:16)</option>
                     <option value="original">Original dimensions</option>
                   </select>
+                  <label class="subtitle-toggle" for="clip-subtitles">
+                    <input id="clip-subtitles" type="checkbox" role="switch" aria-describedby="clip-subtitles-help" />
+                    <span class="subtitle-switch" aria-hidden="true"></span>
+                    <span>Dynamic subtitles</span>
+                  </label>
+                  <p id="clip-subtitles-help">Words build into phrases of up to 8 words, with a subtle scale animation. Included in the MP4.</p>
                 </div>
                 <button
                   type="button"
@@ -552,6 +558,33 @@
         </footer>
       </div>
     </main>
+    <dialog id="subtitle-editor" aria-labelledby="subtitle-editor-title">
+      <div class="subtitle-editor-header">
+        <h2 id="subtitle-editor-title">Edit subtitle spelling</h2>
+        <button id="subtitle-editor-close" type="button" aria-label="Close subtitle editor" title="Close" class="subtitle-editor-close">×</button>
+      </div>
+      <p id="subtitle-editor-name"></p>
+      <p>Click any word to correct it. Leave it empty to remove it; a small × marks its place for editing and will not appear in the video. Corrected words are highlighted.</p>
+      <div class="subtitle-editor-body">
+        <aside class="subtitle-editor-media">
+          <video id="subtitle-editor-video" controls preload="metadata"></video>
+          <p id="subtitle-editor-status" role="status"></p>
+        </aside>
+        <div class="subtitle-editor-copy">
+          <div class="subtitle-paragraph-toolbar">
+            <span id="subtitle-editor-word-help"></span>
+            <button id="subtitle-editor-play-word" type="button" class="secondary-button">Play selected word</button>
+          </div>
+          <div id="subtitle-editor-words" aria-label="Subtitle paragraph"></div>
+        </div>
+      </div>
+      <div id="subtitle-editor-error" class="error-message" role="alert" hidden></div>
+      <div class="subtitle-editor-actions">
+        <button id="subtitle-editor-restore" type="button" class="secondary-button">Restore original text</button>
+        <button id="subtitle-editor-save" type="button" class="secondary-button">Save corrections</button>
+        <button id="subtitle-editor-render" type="button" class="primary-button">Save &amp; regenerate this clip</button>
+      </div>
+    </dialog>
     <dialog id="delete-dialog" aria-labelledby="delete-dialog-title">
       <h2 id="delete-dialog-title">Delete this video?</h2>
       <p id="delete-dialog-name"></p>

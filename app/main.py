@@ -49,6 +49,12 @@ class RetryInput(BaseModel):
 
 class ClipInput(BaseModel):
     mode: Literal["original", "center_crop", "face_follow"] = "original"
+    subtitles: bool = False
+
+
+class CaptionEditInput(BaseModel):
+    revision: str = Field(min_length=64, max_length=64)
+    texts: list[str] = Field(min_length=1, max_length=2000)
 
 
 def create_app(data_dir=None, config_path=None):
@@ -99,7 +105,14 @@ def create_app(data_dir=None, config_path=None):
                 )
                 folder = store.root / job["id"]
                 try:
-                    previous_batch = json.loads((folder / "clips.json").read_text())["directory"]
+                    saved_batch = json.loads((folder / "clips.json").read_text())
+                    previous_batch = saved_batch["directory"]
+                    if job.get("clips_target_id"):
+                        store.update(
+                            job["id"], clips_status="completed", clips_target_id=None,
+                            clips_revision=saved_batch["revision"],
+                            clips_error="Clip regeneration was interrupted. Previous clips are available; retry.",
+                        )
                 except (OSError, ValueError, KeyError):
                     previous_batch = None
                 for partial in [*folder.glob(".clips-*"), *folder.glob("clips-*")]:
@@ -462,6 +475,8 @@ def create_app(data_dir=None, config_path=None):
             clips_error=None,
             clips_message="Queued for clip rendering…",
             clips_mode=options.mode if options else "original",
+            clips_subtitles=options.subtitles if options else False,
+            clips_target_id=None,
         )
         app.state.clip_executor.submit(clip_runner.run, job_id)
         return job
@@ -469,23 +484,90 @@ def create_app(data_dir=None, config_path=None):
     @app.get("/api/jobs/{job_id}/clips")
     def clips(job_id: str):
         job = get_job(job_id)
-        if job.get("clips_status") != "completed":
+        if job.get("clips_status") != "completed" and not (
+            job.get("clips_target_id") and job.get("clips_status") in {"queued", "running"}
+        ):
             raise HTTPException(409, "Clips are not ready yet. Generate clips for the current highlights.")
         import json
 
         data = json.loads((store.root / job_id / "clips.json").read_text())
         if data["highlights_sha256"] != highlight_hash(highlights(job_id)):
             raise HTTPException(409, "Highlights have changed. Generate clips again.")
+        if data.get("subtitles") and (store.root / job_id / "caption-edits.json").exists():
+            from app.caption_edits import editor_document, edits_pending
+            from app.captions import caption_words
+
+            folder = store.root / job_id
+            words = caption_words(json.loads((folder / "transcript.json").read_text()))
+            for item in data["clips"]:
+                document = editor_document(folder, item["id"], item["source_start"], item["source_end"], words)
+                item["subtitle_edits_pending"] = edits_pending(item, document)
         return data
+
+    def caption_editor(job_id, clip_id):
+        from app.caption_edits import editor_document, edits_pending
+
+        data = clips(job_id)
+        item = next((c for c in data["clips"] if c["id"] == clip_id), None)
+        if not item:
+            raise HTTPException(404, "Clip not found.")
+        if not data.get("subtitles"):
+            raise HTTPException(409, "Generate clips with dynamic subtitles before editing their text.")
+        try:
+            document = editor_document(store.root / job_id, clip_id, item["source_start"], item["source_end"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return {**document, "pending": edits_pending(item, document), "title": item["title"]}
+
+    @app.get("/api/jobs/{job_id}/clips/{clip_id}/subtitles")
+    def get_caption_editor(job_id: str, clip_id: str):
+        return caption_editor(job_id, clip_id)
+
+    @app.put("/api/jobs/{job_id}/clips/{clip_id}/subtitles")
+    @serialized
+    def update_caption_text(job_id: str, clip_id: str, body: CaptionEditInput):
+        from app.caption_edits import save_edits
+
+        job = get_job(job_id)
+        if (job["status"] != "completed" or job.get("highlights_status") in {"queued", "running"}
+                or job.get("clips_status") in {"queued", "running"}):
+            raise HTTPException(409, "Wait for current work to finish before saving subtitle corrections.")
+        document = caption_editor(job_id, clip_id)
+        if document["revision"] != body.revision:
+            raise HTTPException(409, "Subtitle text changed. Reopen the editor before saving.")
+        try:
+            save_edits(store.root / job_id, clip_id, document, body.texts)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return caption_editor(job_id, clip_id)
+
+    @app.post("/api/jobs/{job_id}/clips/{clip_id}/regenerate", status_code=202)
+    @serialized
+    def regenerate_clip(job_id: str, clip_id: str):
+        job = get_job(job_id)
+        if (job["status"] != "completed" or job.get("highlights_status") != "completed"
+                or job.get("clips_status") in {"queued", "running"}):
+            raise HTTPException(409, "Wait for current work to finish before regenerating a clip.")
+        data = clips(job_id)
+        if not any(item["id"] == clip_id for item in data["clips"]):
+            raise HTTPException(404, "Clip not found.")
+        if not job.get("source_file") or not (store.root / job_id / job["source_file"]).is_file():
+            raise HTTPException(409, "The original video is missing. Upload or download it again.")
+        job = store.update(
+            job_id, clips_status="queued", clips_progress=0, clips_error=None,
+            clips_target_id=clip_id, clips_message="Queued to regenerate this clip…",
+        )
+        app.state.clip_executor.submit(clip_runner.run, job_id, clip_id)
+        return job
 
     @app.get("/api/jobs/{job_id}/clips/{clip_id}/media")
     def clip_media(job_id: str, clip_id: str, download: bool = False, revision: str | None = None):
         data = clips(job_id)
-        if revision is not None and revision != data["revision"]:
-            raise HTTPException(409, "This clip belongs to an older render. Reload the video workspace.")
         item = next((c for c in data["clips"] if c["id"] == clip_id), None)
         if not item:
             raise HTTPException(404, "Clip not found.")
+        if revision is not None and revision != item.get("revision", data["revision"]):
+            raise HTTPException(409, "This clip belongs to an older render. Reload the video workspace.")
         path = store.root / job_id / data["directory"] / item["filename"]
         if not path.is_file():
             raise HTTPException(404, "Clip file is missing. Generate clips again.")
