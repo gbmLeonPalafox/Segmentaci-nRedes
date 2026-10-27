@@ -1889,6 +1889,15 @@ footer > span:last-child {
   min-width: 160px;
   padding: 11px 15px;
 }
+.clip-controls label {
+  display: block;
+  font-size: 12px;
+  margin-top: 12px;
+}
+.clip-controls select {
+  margin-top: 6px;
+  max-width: 100%;
+}
 .clip-ready-summary {
   font-size: 12px;
   color: #6a8556;
@@ -1917,6 +1926,11 @@ footer > span:last-child {
   font-size: 12px;
   margin-top: 10px;
   align-self: flex-start;
+}
+.clip-preview.vertical {
+  width: auto;
+  height: 300px;
+  max-width: 100%;
 }
 .clip-file-info {
   font-size: 11px;

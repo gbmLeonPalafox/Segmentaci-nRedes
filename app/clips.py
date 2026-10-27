@@ -43,8 +43,18 @@ def validate_ranges(highlights, duration):
     return items
 
 
-def render_clip(source, destination, start, end, metadata):
-    pixel_format = "yuv444p" if metadata["width"] % 2 or metadata["height"] % 2 else "yuv420p"
+def render_clip(source, destination, start, end, metadata, mode="original", detector=None):
+    expected = (metadata["width"], metadata["height"])
+    filters, framing = [], {"mode": "original"}
+    commands_file = destination.with_suffix(".crop.cmd")
+    if mode != "original":
+        from app.reframing import plan_reframe
+
+        expression, expected, framing = plan_reframe(
+            source, start, end, metadata, mode, commands_file, detector
+        )
+        filters = ["-vf", expression]
+    pixel_format = "yuv444p" if expected[0] % 2 or expected[1] % 2 else "yuv420p"
     result = subprocess.run(
         [
             ffmpeg_path(),
@@ -55,15 +65,16 @@ def render_clip(source, destination, start, end, metadata):
             "-y",
             "-ss",
             f"{start:.6f}",
-            "-noautorotate",
+            *(["-noautorotate"] if mode == "original" else []),
             "-i",
-            str(source),
+            str(source.resolve()),
             "-t",
             f"{end - start:.6f}",
             "-map",
             "0:v:0",
             "-map",
             "0:a:0",
+            *filters,
             "-c:v",
             "libx264",
             "-preset",
@@ -78,18 +89,20 @@ def render_clip(source, destination, start, end, metadata):
             "192k",
             "-movflags",
             "+faststart",
-            str(destination),
+            str(destination.resolve()),
         ],
         capture_output=True,
         text=True,
         timeout=1800,
         check=False,
+        cwd=destination.parent,
     )
+    commands_file.unlink(missing_ok=True)
     if result.returncode:
         raise ValueError("FFmpeg could not render this clip. Check that the original video is readable.")
     rendered = inspect_media(destination)
-    if (rendered["width"], rendered["height"]) != (metadata["width"], metadata["height"]):
-        raise ValueError("Rendered dimensions differ from the original video.")
+    if (rendered["width"], rendered["height"]) != expected:
+        raise ValueError("Rendered dimensions differ from the requested clip format.")
     tolerance = max(0.25, 2 / max(metadata.get("fps", 25), 0.1))
     if abs(rendered["duration"] - (end - start)) > tolerance:
         raise ValueError("Rendered duration differs from the selected passage.")
@@ -99,7 +112,7 @@ def render_clip(source, destination, start, end, metadata):
     with av.open(str(destination)) as container:
         if next(container.decode(video=0), None) is None:
             raise ValueError("The rendered clip contains no readable video frames.")
-    return rendered
+    return {**rendered, "framing": framing}
 
 
 class ClipRunner:
@@ -119,6 +132,12 @@ class ClipRunner:
                 clips_message="Inspecting the original video…",
             )
             job = self.store.get(job_id)
+            mode = job.get("clips_mode", "original")
+            detector = None
+            if mode == "face_follow":
+                from app.reframing import FaceDetector
+
+                detector = FaceDetector()
             source = folder / job["source_file"]
             metadata = inspect_media(source)
             highlights = json.loads((folder / "highlights.json").read_text())
@@ -129,11 +148,15 @@ class ClipRunner:
                 self.store.update(
                     job_id,
                     clips_progress=round(5 + 90 * index / len(items)),
-                    clips_message=f"Rendering clip {index + 1} of {len(items)}…",
+                    clips_message=(
+                        f"Following the face and rendering clip {index + 1} of {len(items)}…"
+                        if mode == "face_follow"
+                        else f"Rendering clip {index + 1} of {len(items)}…"
+                    ),
                 )
                 filename = f"{item['id']}.mp4"
                 target = staging / filename
-                output = render_clip(source, target, item["start"], item["end"], metadata)
+                output = render_clip(source, target, item["start"], item["end"], metadata, mode, detector)
                 clips.append(
                     {
                         "id": item["id"],
@@ -146,10 +169,12 @@ class ClipRunner:
                         "height": output["height"],
                         "size_bytes": target.stat().st_size,
                         "filename": filename,
+                        "framing": output["framing"],
                     }
                 )
             result = {
-                "version": 1,
+                "version": 2,
+                "mode": mode,
                 "job_id": job_id,
                 "revision": revision,
                 "created_at": datetime.now(UTC).isoformat(),

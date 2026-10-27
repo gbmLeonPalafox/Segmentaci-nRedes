@@ -13,19 +13,19 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 Open **http://127.0.0.1:8000**. Keep the terminal running while jobs process. Use one server process; the queue is designed for a single local worker.
 
-The FFmpeg executable is bundled through `imageio-ffmpeg`, so a system FFmpeg installation is optional. An existing FFmpeg on PATH takes precedence. Transcription runs on the CPU using faster-whisper with int8 computation. No API key is required. On first use, the selected model and voice-activity detector are downloaded from their upstream model hosts. Models remain in the standard Hugging Face cache for later runs. Start with Tiny to test quickly, or Base for a balanced default; larger models need substantially more memory and time.
+The FFmpeg executable is bundled through `imageio-ffmpeg`, so a system FFmpeg installation is optional. An existing FFmpeg on PATH takes precedence. Transcription always uses **OpenAI Whisper API** (`whisper-1`). Passage selection defaults to **GPT-5.5**, and both API stages use the same OpenAI API key. No local transcription models or model-weight downloads are used. FFmpeg renders the selected passages as MP4 clips locally.
 
 ## Use
 
 1. Upload a video or paste a single YouTube video/Short URL.
-2. Choose a Whisper model and auto-detect or select the spoken language.
+2. Select or auto-detect the spoken language. Transcription uses OpenAI Whisper API.
 3. Create the transcript and follow job progress. Multiple videos queue sequentially.
 4. Click a transcript timestamp to seek and play the video. Search passages or enable Follow playback.
 5. Export plain text, SRT subtitles, structured JSON with word timestamps, or a standalone readable HTML report.
 
-Original media is retained. Cropping, resizing, translation, and social publishing are outside this version. LLM highlight selection is optional and sends transcript text to OpenAI only when you click Generate highlights. Unsupported browser video containers/codecs get an H.264/AAC MP4 preview at the same dimensions. Rare odd-sized sources use H.264 4:4:4 to preserve dimensions, which some browsers cannot play; their transcript exports remain useful. For dependable playback, use even-sized H.264/AAC MP4 input.
+Original media is retained. Clip exports support original dimensions or vertical 9:16 framing. Translation and social publishing are outside this version. Whisper API sends extracted audio to OpenAI when you create a transcript with the app. LLM highlight selection is optional and sends transcript text to OpenAI when you click Generate highlights. Unsupported browser video containers/codecs get an H.264/AAC MP4 preview at the same dimensions. Rare odd-sized sources use H.264 4:4:4 to preserve dimensions, which some browsers cannot play; their transcript exports remain useful. For dependable playback, use even-sized H.264/AAC MP4 input.
 
-Uploads default to 2 GB and all videos default to a three-hour duration limit. YouTube metadata is checked before download; live/upcoming streams are rejected. The best available video/audio streams are downloaded and merged without changing dimensions. YouTube may reject requests because of availability, restrictions, or anti-bot checks; the failure is shown in the UI. Cookie-based sign-in is not implemented. Keep yt-dlp current when YouTube changes:
+Uploads default to 5 GB and all videos default to a three-hour duration limit. YouTube metadata is checked before download; live/upcoming streams are rejected. The best available video/audio streams are downloaded and merged without changing dimensions. YouTube may reject requests because of availability, restrictions, or anti-bot checks; the failure is shown in the UI. Cookie-based sign-in is not implemented. Keep yt-dlp current when YouTube changes:
 
 ```sh
 uv lock --upgrade-package yt-dlp --upgrade-package yt-dlp-ejs
@@ -33,19 +33,39 @@ uv sync
 ```
 
 
+## Transcribe with Whisper API
+
+1. Put your OpenAI API key in `[llm]` → `api_key` in the local `config.toml`. Alternatively set `OPENAI_API_KEY` in the server environment. Both transcription and highlight selection use this credential. Do not put the key in the browser or commit it.
+2. Restart the server after installing this code update, then refresh the browser. Later key edits need no restart.
+3. Upload a video or paste a YouTube URL, and click **Create transcript**. The transcription model is fixed to **Whisper API · OpenAI**. API usage is billed by OpenAI.
+
+The app uploads mono 16 kHz PCM audio in parts of at most ten minutes (about 19.2 MB each), below the 25 MB file limit. It requests segment and word timestamps and shifts each part's times back onto the source video's timeline. Words at a part boundary may lose sentence context. Transcript exports, highlight selection, and clips work with these timestamps. API responses do not provide word confidence or language probability; those values are stored as null. The reported language may be a full language name.
+
+Failed requests show safe errors for key, quota, or connection issues. An interrupted API job requires an explicit retry after server restart, as retrying can repeat paid requests. Within a request, SDK transient retries remain enabled. Temporary upload parts are cleaned up on completion or failure; a completed transcript also removes the extracted WAV. The **Retry with Whisper API** button also switches older failed local-model jobs to OpenAI, reusing their video file. Completed historical transcripts remain available. All upload and YouTube endpoints default to `whisper-1`; requesting a local model is rejected. Pending jobs, including legacy local jobs, require an explicit retry after restart to avoid automatically repeating paid API calls.
+
+OpenAI currently lists `whisper-1` for shutdown on February 26, 2027; see the [speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text). This implementation uses Whisper as requested for its word and segment timestamps.
+
+The [OpenAI transcription API reference](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create) documents `whisper-1`, `verbose_json`, and timestamp options.
+
+## Upload large video files
+
+The interface accepts videos up to **5 GB** by default (`5 × 1024³` bytes). `MAX_UPLOAD_BYTES` changes the server limit and the interface reads that value from `/api/health`. Uploads use sequential 8 MB requests and retry a failed part up to three times. Each attempt has a two-minute timeout; progress shows bytes acknowledged by the server. Retrying an identical part cannot duplicate bytes. Completing an upload twice returns the same job and never queues it twice.
+
+The processing queue receives a video only after its declared byte count has arrived. Failed uploads are discarded when the client can reach the server to cancel them. Interrupted sessions after a browser/server crash can leave temporary files in `data/.uploads/`; these sessions do not appear in the video library. Retrying from a new page starts a fresh upload. The existing single multipart `/api/jobs/upload` endpoint remains available to API clients with the same 5 GB limit. Allow free disk space for the video, audio, preview, and generated clips; the three-hour duration limit still applies.
+
 ## Select highlights with an LLM
 
 The actual `config.toml` is already created locally and excluded from Git. It is never served to the browser. A shareable template is in `config.example.toml`.
 
 1. Add an OpenAI API key to `api_key` in the `[llm]` section of `config.toml`. `OPENAI_API_KEY` in the server environment takes precedence when set.
-2. Keep `model = "gpt-5.6-terra"`, or choose another OpenAI model supporting the Responses API and Structured Outputs. API usage requires billing/access separate from a ChatGPT subscription.
+2. Keep `model = "gpt-5.5"`, or choose another OpenAI model supporting the Responses API and Structured Outputs. [GPT-5.5 supports both](https://developers.openai.com/api/docs/models/gpt-5.5). API usage requires billing/access separate from a ChatGPT subscription.
 3. Open any completed video. Under **Find the important parts**, click **Check config** (the app also checks periodically).
 4. Adjust the maximum number of highlights, minimum/maximum duration, and editorial goal, then click **Generate highlights**. No restart or retranscription is required.
 5. Read the ranked passages, selection reasons, and exact source text; preview each passage or export a standalone HTML report / structured JSON.
 
-By default, the pass selects up to five continuous passages of 20–90 seconds. Short videos may produce zero highlights; lower the minimum for those. Fewer passages are allowed when quality or duration rules cannot be met. Whisper word timings are grouped into sentences across segment boundaries, so selections preserve sentence openings and negations. Sentences longer than the maximum duration cannot be selected on their own; increase the maximum for those. Older transcripts without word timings use whole segments. Timestamps remain estimates inherited from transcription.
+By default, the pass selects up to five continuous passages of 20–90 seconds. Short videos may produce zero highlights; lower the minimum for those. Fewer passages are allowed when quality or duration rules cannot be met. Sentence units align the punctuation in Whisper segment text with existing word timestamps. This also works with saved Whisper API transcripts whose word entries contain no punctuation, without retranscribing or changing the saved transcript. Exact text alignment preserves word boundaries; when segment text and words differ, the entire segment is retained with its source timestamps instead of guessing an internal cut. Sentence continuations are grouped across segment boundaries, preserving sentence openings and negations. Sentences longer than the maximum duration cannot be selected on their own; increase the maximum for those. Older transcripts without word timings use whole segments. Timestamps remain estimates inherited from transcription.
 
-Only transcript text, language, and selection instructions are sent to OpenAI. Media stays local. The SDK uses Structured Outputs with `store=False`. Long transcripts are read in bounded, overlapping windows and candidates are ranked across the video. Selections are validated against actual unit IDs and durations, with one targeted repair attempt for semantic errors. Overlapping passages are removed. The model never supplies the saved text or timestamps: those are resolved from the local transcript.
+For highlight selection, only transcript text, language, and selection instructions are sent to OpenAI. Whisper API transcription separately sends extracted audio to OpenAI. The SDK uses Structured Outputs with `store=False`. Long transcripts are read in bounded, overlapping windows and candidates are ranked across the video. Selections are validated against actual unit IDs and durations, with one targeted repair attempt for semantic errors. Overlapping passages are removed. The model never supplies the saved text or timestamps: those are resolved from the local transcript.
 
 Each successful selection is stored as `data/<job-id>/highlights.json`, with the source transcript hash, exact passages, reasons, ranks, settings, model name, and token/request usage. Scores are subjective editorial assessments. Regenerating replaces the current highlight result only after success. The original transcript stays available when selection fails. Interrupted LLM jobs are marked as failed on restart and require an explicit retry, rather than automatically repeating potentially billed requests. SDK transient-error retries are enabled.
 
@@ -64,7 +84,17 @@ Highlight tests exercise the actual OpenAI SDK against an HTTP mock, validation/
 
 ## Generate and download video clips
 
-After selecting highlights, click **Generate clips**. Each passage becomes an H.264/AAC MP4 cut from the original source video, with its width, height, and aspect ratio preserved. There is no crop, resize, caption overlay, or platform reframing. Cuts are re-encoded for accurate start times rather than limited to existing keyframes. Odd-sized inputs use yuv444p to preserve their exact dimensions; browser support for that pixel format varies.
+After selecting highlights, choose an **Export format**, then click **Generate clips**. Each passage becomes an H.264/AAC MP4 cut from the original source video. Available formats:
+
+- **Vertical · Face follow (9:16)** is the UI default. A bundled OpenCV YuNet detector analyzes only the selected ranges, approximately eight times per second. Nearby face detections are associated to keep following the same person. This does not identify the active speaker.
+- **Vertical · Center crop (9:16)** keeps the crop fixed at the center and requires no face detection.
+- **Original dimensions** preserves the source dimensions. This remains the API default when no options are supplied. Odd-sized originals use yuv444p; browser support for that pixel format varies.
+
+Face follow prioritizes a steady frame: median filtering removes detection noise; shots with small movements use a fixed crop; the camera responds quickly at the start of each shot, then its response and speed/acceleration limits decay exponentially over 2.5 seconds. The dead zone grows from 6% to 16% of the crop to ignore small movements once the framing has settled. Each layout uses a fixed crop size, preventing zoom wobble. Short detection gaps hold the framing, and longer gaps ease toward the center. Spatial scene-cut detection immediately reframes at detected edits, restarting the 2.5-second settling period. When two substantial, separated faces persist for at least 0.25 seconds, only that interval uses a stacked layout (left participant above, right participant below). Brief detection misses are bridged to avoid layout flicker; scene cuts end the previous layout immediately. Other intervals keep a single full-height frame. This does not identify who is speaking or analyze lip movements. Large subject movements, occlusions, and subtle cuts can still need manual review.
+
+Vertical clips use the largest exact 9:16 crop with even dimensions, with output capped at 1080 × 1920 and no upscaling or stretching. Smaller sources produce smaller exports. No-face shots use the centered crop, and the clip preview identifies exports where no faces were found. The model and MIT license are bundled in `app/assets/`; no runtime model download or external face-tracking service is required. Run `uv sync` after updating to install OpenCV.
+
+Cuts are re-encoded for accurate start times rather than limited to existing keyframes. Caption overlays and social publishing are not included.
 
 The frontend shows rendering progress, then adds an embedded player and **Download clip** link to each passage. Metadata shows duration, dimensions, and file size. The original video remains available. Clips are rendered in a separate single-worker queue, and this stage makes no LLM calls.
 
@@ -74,7 +104,7 @@ Rendered batches are stored in `data/<job-id>/clips-<revision>/` with a `clips.j
 
 Select a video and click **Delete video** beside Export transcript. The dialog shows the video title and stored file size, describes what will be removed, and lets you keep the video or permanently delete it.
 
-Deletion removes that video's entire directory: original media, playback preview, temporary audio, transcripts, highlight reports, generated clips, and unfinished outputs. It also removes the job from SQLite and the sidebar. Shared Whisper model downloads and other videos are retained. The app releases its media players before deletion.
+Deletion removes that video's entire directory: original media, playback preview, temporary audio, transcripts, highlight reports, generated clips, and unfinished outputs. It also removes the job from SQLite and the sidebar. Other videos are retained. The app releases its media players before deletion.
 
 Deletion is disabled while that video has queued/running transcription, highlight selection, or clipping. The backend also enforces this restriction and serializes deletion against starting new work. If filesystem cleanup fails, the record remains available for another deletion attempt. Startup retries incomplete cleanup after an interrupted deletion.
 
@@ -82,7 +112,7 @@ Additional routes:
 
 | Route | Purpose |
 | --- | --- |
-| `POST /api/jobs/{id}/clips` | Queue MP4 rendering for all current highlights |
+| `POST /api/jobs/{id}/clips` | Queue MP4 rendering; optional JSON `{"mode":"original"}`, `{"mode":"center_crop"}`, or `{"mode":"face_follow"}` |
 | `GET /api/jobs/{id}/clips` | Current rendered batch and file metadata |
 | `GET /api/jobs/{id}/clips/{clip_id}/media` | Play a clip, including range requests; `?download=true` downloads it |
 | `GET /api/jobs/{id}/storage` | Current stored file size for a video |
@@ -97,7 +127,7 @@ Optional environment variables:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DATA_DIR` | `data` | Persistent job/media directory |
-| `MAX_UPLOAD_BYTES` | `2147483648` | Maximum accepted uploaded file size |
+| `MAX_UPLOAD_BYTES` | `5368709120` | Maximum accepted uploaded file size |
 | `MAX_VIDEO_SECONDS` | `10800` | Maximum video duration, uploads and YouTube |
 
 This is a local, single-user application with no authentication. The default command binds to loopback. The UI uses Google Fonts when reachable, with system font fallbacks.
@@ -135,8 +165,7 @@ API routes:
 uv run pytest -q
 uv run ruff check app tests
 node --check app/static/app.js
+node --test tests/upload-client.test.cjs
 ```
 
-Automated tests don't download model weights or call YouTube. They exercise real extraction, background execution, media playback responses, exports, failures, retries, and restart recovery using controlled fixtures. A real transcription smoke check requires network access to obtain a model on its first run.
-
-During implementation, both a real uploaded speech sample and a real YouTube download were transcribed with the Tiny model. Browser checks confirmed search, timestamp seeking, playback, and unchanged media dimensions. PyAV is constrained below version 19 because the released faster-whisper 1.2.1 still calls an audio-decoder argument removed in PyAV 19; the decoder regression test covers that compatibility boundary.
+Automated tests make no live OpenAI or YouTube requests. They exercise real extraction, background execution, media playback, exports, uploads, failures, retries, and restart recovery using controlled fixtures. SDK tests verify actual HTTP requests against a mock, including Whisper word/segment timestamps and GPT-5.5 structured selection. Existing completed transcripts created before the OpenAI-only change remain readable.

@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo"}
+MODELS = {"whisper-1"}
 MAX_DURATION = int(os.getenv("MAX_VIDEO_SECONDS", "10800"))
 logger = logging.getLogger(__name__)
 
@@ -163,12 +163,15 @@ def export_transcript(transcript, kind):
 
 
 class Pipeline:
-    def __init__(self, store):
+    def __init__(self, store, config_path=None):
         self.store = store
-        self.models = {}
+        self.config_path = config_path
 
     def run(self, job_id):
         job = self.store.get(job_id)
+        # Older failed jobs and unfinished upload sessions also use OpenAI on retry.
+        job["model"] = "whisper-1"
+        self.store.update(job_id, model="whisper-1")
         folder = self.store.root / job_id
         try:
             self.store.update(
@@ -224,25 +227,12 @@ class Pipeline:
             preview = make_preview(source, metadata)
             self.store.update(job_id, preview_file=preview.name)
             self.store.update(
-                job_id,
-                stage="model",
-                progress=35,
-                message=f"Loading Whisper {job['model']}. First use downloads the model…",
+                job_id, stage="transcribe", progress=40,
+                message="Sending audio to OpenAI Whisper…",
             )
-            model = self.get_model(job["model"])
-            self.store.update(
-                job_id,
-                stage="transcribe",
-                progress=40,
-                message="Listening and creating timestamped transcript…",
-            )
-            segments, info = model.transcribe(
-                str(audio),
-                language=job["language"] or None,
-                word_timestamps=True,
-                vad_filter=True,
-                beam_size=5,
-            )
+            from app.transcription import transcribe_api
+
+            segments, info = transcribe_api(audio, job["language"], self.config_path)
             collected = []
             offset = metadata["audio_offset"]
             for segment in segments:
@@ -277,6 +267,7 @@ class Pipeline:
                 "job_id": job_id,
                 "title": current["title"],
                 "model": job["model"],
+                "provider": "openai",
                 "language": info.language,
                 "language_probability": info.language_probability,
                 "duration": metadata["duration"],
@@ -299,14 +290,6 @@ class Pipeline:
         except Exception as exc:
             logger.exception("Job %s failed", job_id)
             self.store.update(job_id, status="failed", message="Processing stopped.", error=str(exc)[:1200])
-
-    def get_model(self, name):
-        from faster_whisper import WhisperModel
-
-        if name not in self.models:
-            self.models.clear()  # Keep one model in memory on local machines.
-            self.models[name] = WhisperModel(name, device="cpu", compute_type="int8")
-        return self.models[name]
 
     def download(self, job, folder):
         from yt_dlp import YoutubeDL

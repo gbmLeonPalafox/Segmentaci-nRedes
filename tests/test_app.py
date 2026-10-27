@@ -58,15 +58,16 @@ def client(tmp_path, monkeypatch):
         words=[SimpleNamespace(start=0.1, end=0.9, word=" Hello", probability=0.99)],
     )
 
-    class Model:
-        def transcribe(self, path, **kwargs):
-            assert kwargs["word_timestamps"] is True
-            assert kwargs["language"] == "en"
-            assert path.endswith("audio.wav")
-            return iter([segment]), SimpleNamespace(language="en", language_probability=0.99)
+    def transcribe(path, language, config_path):
+        assert language == "en"
+        assert path.name == "audio.wav"
+        return iter([segment]), SimpleNamespace(language="en", language_probability=None)
 
-    monkeypatch.setattr(Pipeline, "get_model", lambda self, name: Model())
-    app = create_app(tmp_path / "app-data")
+    monkeypatch.setattr("app.transcription.transcribe_api", transcribe)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config = tmp_path / "config.toml"
+    config.write_text('[llm]\napi_key = "test-secret"\n')
+    app = create_app(tmp_path / "app-data", config)
     with TestClient(app) as session:
         yield session
 
@@ -103,7 +104,7 @@ def test_complete_upload_transcript_and_exports(client, video):
     result = client.post(
         "/api/jobs/upload",
         files={"file": ("interview.mp4", video.read_bytes(), "video/mp4")},
-        data={"model": "tiny", "language": "en"},
+        data={"model": "whisper-1", "language": "en"},
     )
     assert result.status_code == 202
     job_id = result.json()["id"]
@@ -176,20 +177,16 @@ def test_youtube_job_uses_shared_pipeline(client, video, monkeypatch):
     assert job["channel"] == "Example channel"
 
 
-def test_restart_resumes_pending_jobs(tmp_path, monkeypatch):
+def test_restart_requires_explicit_retry_for_legacy_pending_jobs(tmp_path, monkeypatch):
     from app.store import Store
 
     store = Store(tmp_path)
-    store.save({"id": "pending", "status": "running", "stage": "transcribe"})
+    store.save({"id": "pending", "status": "running", "stage": "transcribe", "model": "base"})
     calls = []
     monkeypatch.setattr(Pipeline, "run", lambda self, job_id: calls.append(job_id))
     with TestClient(create_app(tmp_path)) as client:
-        for _ in range(100):
-            if calls:
-                break
-            time.sleep(0.01)
-        assert calls == ["pending"]
-        assert client.get("/api/jobs/pending").json()["status"] == "queued"
+        assert client.get("/api/jobs/pending").json()["status"] == "failed"
+        assert calls == []
 
 
 def test_html_escapes_title_and_json_roundtrip():
@@ -202,15 +199,6 @@ def test_probe_dimensions(video):
     metadata = inspect_media(video)
     assert metadata["width"] == 320 and metadata["height"] == 240
     assert 0.9 < metadata["duration"] < 1.2
-
-
-def test_whisper_audio_decoder_compatibility(video):
-    # Exercise the actual faster-whisper/PyAV boundary without downloading model weights.
-    from faster_whisper.audio import decode_audio
-
-    audio = decode_audio(str(video))
-    assert 15000 <= len(audio) <= 18000
-    assert audio.dtype.name == "float32"
 
 
 def test_mkv_preview_preserves_dimensions(video, tmp_path):
@@ -238,3 +226,55 @@ def test_video_without_audio_is_rejected(tmp_path):
     )
     with pytest.raises(ValueError, match="audio track"):
         inspect_media(target)
+
+
+def test_api_transcription_preserves_exports_and_timeline(tmp_path, monkeypatch, video):
+    import httpx
+    from openai import OpenAI
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config = tmp_path / "api.toml"
+    config.write_text('[llm]\napi_key = "test-api-secret"\n')
+    def respond(request):
+        return httpx.Response(200, json={
+            "text": "Hola mundo.", "language": "spanish", "duration": 1,
+            "segments": [{"id": 0, "start": 0.1, "end": 0.9, "text": "Hola mundo.",
+                          "avg_logprob": -0.1, "no_speech_prob": 0.01}],
+            "words": [{"word": "Hola", "start": 0.1, "end": 0.4},
+                      {"word": "mundo.", "start": 0.4, "end": 0.9}],
+        })
+    monkeypatch.setattr("app.transcription.OpenAI", lambda **kwargs: OpenAI(
+        **kwargs, http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    ))
+    with TestClient(create_app(tmp_path / "remote-data", config)) as client:
+        response = client.post("/api/jobs/upload", files={
+            "file": ("video.mp4", video.read_bytes(), "video/mp4"),
+        }, data={"model": "whisper-1", "language": "es"})
+        assert response.status_code == 202
+        job_id = response.json()["id"]
+        job = wait_for(client, job_id)
+        assert job["status"] == "completed", job
+        transcript = client.get(f"/api/jobs/{job_id}/transcript").json()
+        assert transcript["provider"] == "openai"
+        assert transcript["model"] == "whisper-1"
+        assert transcript["segments"][0]["words"][1]["word"] == "mundo."
+        assert "Hola mundo." in client.get(f"/api/jobs/{job_id}/export/srt").text
+        assert not (tmp_path / "remote-data" / job_id / "audio.wav").exists()
+        assert "test-api-secret" not in json.dumps(job)
+
+
+def test_chunked_video_upload_processes_only_after_completion(client, video):
+    data = video.read_bytes()
+    session = client.post("/api/uploads", json={
+        "filename": "interview.mp4", "size": len(data), "model": "whisper-1", "language": "en",
+    }).json()
+    url = f"/api/uploads/{session['id']}"
+    split = len(data) // 2
+    assert client.put(url + "?offset=0", content=data[:split]).status_code == 200
+    assert client.get(f"/api/jobs/{session['id']}").status_code == 404
+    assert client.put(url + f"?offset={split}", content=data[split:]).status_code == 200
+    response = client.post(url + "/complete")
+    assert response.status_code == 202
+    job = wait_for(client, session["id"])
+    assert job["status"] == "completed", job
+    assert client.get(f"/api/jobs/{session['id']}/export/srt").status_code == 200

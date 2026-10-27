@@ -8,6 +8,11 @@ const state = {
   rendered: null,
   uploading: false,
 };
+let maxUploadBytes = 5 * 1024 ** 3;
+api("/api/health").then((health) => {
+  maxUploadBytes = health.max_upload_bytes;
+  $("upload-limit").textContent = `${(maxUploadBytes / 1024 ** 3).toFixed(0)} GB`;
+}).catch(() => {});
 let pollTimer;
 let loadVersion = 0;
 const steps = ["acquire", "audio", "transcribe", "complete"];
@@ -70,8 +75,8 @@ for (const source of ["upload", "youtube"]) {
 }
 function chooseFile(file) {
   if (!file) return;
-  if (file.size > 2 * 1024 ** 3) {
-    showError("This video exceeds the 2 GB upload limit.");
+  if (file.size > maxUploadBytes) {
+    showError(`This video exceeds the ${(maxUploadBytes / 1024 ** 3).toFixed(1)} GB upload limit.`);
     return;
   }
   if (!/\.(mp4|mov|mkv|webm|avi|m4v|mpeg|mpg|mts)$/i.test(file.name)) {
@@ -395,7 +400,7 @@ $("video-player").addEventListener("error", () =>
     "The video preview could not load. Your transcript and exports are still available.",
   ),
 );
-$("retry-button").addEventListener("click", async () => {
+async function retryTranscription() {
   $("retry-button").disabled = true;
   try {
     const job = await api(`/api/jobs/${state.active}/retry`, {
@@ -408,38 +413,56 @@ $("retry-button").addEventListener("click", async () => {
   } finally {
     $("retry-button").disabled = false;
   }
-});
+}
+$("retry-button").addEventListener("click", () => retryTranscription());
 
-function uploadFile(data) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/jobs/upload");
-    xhr.upload.addEventListener("progress", (e) => {
-      if (e.lengthComputable)
-        $("submit-button").querySelector("span").textContent =
-          `Uploading video · ${Math.round((e.loaded / e.total) * 100)}%`;
-    });
-    xhr.addEventListener("load", () => {
-      try {
-        const body = JSON.parse(xhr.responseText);
-        if (xhr.status >= 200 && xhr.status < 300) resolve(body);
-        else
-          reject(
-            new Error(
-              typeof body.detail === "string"
-                ? body.detail
-                : "The upload failed.",
-            ),
-          );
-      } catch {
-        reject(new Error("The server could not complete the upload."));
-      }
-    });
-    xhr.addEventListener("error", () =>
-      reject(new Error("Connection lost during upload. Please try again.")),
-    );
-    xhr.send(data);
+async function uploadFile(file, model, language) {
+  const session = await api("/api/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: file.name, size: file.size, model, language }),
   });
+  async function retryRequest(path, options) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await fetch(path, { ...options, signal: AbortSignal.timeout(120000) });
+        if (response.ok) return await response.json();
+        if (response.status < 500) {
+          const body = await response.json();
+          const error = new Error(body.detail || "The upload failed.");
+          error.permanent = true;
+          throw error;
+        }
+        throw new Error("The server could not accept this part of the upload.");
+      } catch (error) {
+        if (error.permanent || attempt >= 3) throw error;
+        $("submit-button").querySelector("span").textContent = "Connection interrupted · retrying this part…";
+        await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+      }
+    }
+  }
+  try {
+    let offset = 0;
+    while (offset < file.size) {
+      const end = Math.min(offset + session.chunk_bytes, file.size);
+      const result = await retryRequest(`/api/uploads/${session.id}?offset=${offset}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file.slice(offset, end),
+      });
+      if (result.offset !== end) throw new Error("Upload position mismatch. Please try again.");
+      offset = result.offset;
+      $("submit-button").querySelector("span").textContent =
+        `Uploading video · ${Math.round(offset / file.size * 100)}%`;
+    }
+    $("submit-button").querySelector("span").textContent = "Upload complete · preparing your video…";
+    const job = await retryRequest(`/api/uploads/${session.id}/complete`, { method: "POST" });
+    $("submit-button").querySelector("span").textContent = "Upload complete";
+    return job;
+  } catch (error) {
+    await fetch(`/api/uploads/${session.id}`, { method: "DELETE", signal: AbortSignal.timeout(10000) }).catch(() => {});
+    throw error;
+  }
 }
 $("import-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -472,11 +495,7 @@ $("import-form").addEventListener("submit", async (e) => {
         }),
       });
     } else {
-      const data = new FormData();
-      data.append("file", state.file);
-      data.append("model", model);
-      data.append("language", language);
-      job = await uploadFile(data);
+      job = await uploadFile(state.file, model, language);
     }
     state.uploading = false;
     state.jobs = [job, ...state.jobs.filter((j) => j.id !== job.id)];
@@ -822,6 +841,12 @@ function resetClips() {
 function renderClipState(job) {
   if (job.id !== state.active) return;
   const busy = ["queued", "running"].includes(job.clips_status);
+  $("clip-mode").disabled = busy;
+  if ($("clip-mode").dataset.job !== job.id) {
+    $("clip-mode").dataset.job = job.id;
+    $("clip-mode").value = job.clips_mode || "face_follow";
+    updateClipFormatHelp();
+  }
   $("generate-clips").disabled =
     busy ||
     job.highlights_status !== "completed" ||
@@ -864,13 +889,16 @@ function attachClipPreviews() {
   if (!clipData || !highlightData || clipData.job_id !== state.active) return;
   $("clip-ready-summary").hidden = false;
   const total = clipData.clips.reduce((sum, item) => sum + item.size_bytes, 0);
+  const format = { original: "original dimensions", center_crop: "vertical · center crop", face_follow: "vertical · face follow" }[clipData.mode || "original"];
   $("clip-ready-summary").textContent =
-    `${clipData.clips.length} MP4 clips ready · ${bytesLabel(total)} · original dimensions preserved`;
+    `${clipData.clips.length} MP4 clips ready · ${bytesLabel(total)} · ${format}`;
   for (const item of clipData.clips) {
     const card = document.querySelector(`[data-highlight-id="${item.id}"]`);
     if (!card || card.querySelector(".clip-preview")) continue;
     const video = document.createElement("video");
     video.className = "clip-preview";
+    if (item.height > item.width) video.classList.add("vertical");
+    video.style.aspectRatio = `${item.width} / ${item.height}`;
     video.controls = true;
     video.preload = "metadata";
     video.setAttribute("aria-label", `Clip ${item.rank}: ${item.title}`);
@@ -884,6 +912,7 @@ function attachClipPreviews() {
     const info = document.createElement("p");
     info.className = "clip-file-info";
     info.textContent = `${item.width} × ${item.height} · ${formatTime(item.duration)} · ${bytesLabel(item.size_bytes)}`;
+    if (item.framing?.fallback === "center_crop") info.textContent += " · No face found; centered crop";
     const download = document.createElement("a");
     download.className = "clip-download";
     download.href = `${url}?download=true&revision=${clipData.revision}`;
@@ -892,12 +921,24 @@ function attachClipPreviews() {
     card.append(video, info, download);
   }
 }
+function updateClipFormatHelp() {
+  $("clip-format-help").textContent = {
+    face_follow: "Gently follows one person; stacks two people only while both are on screen.",
+    center_crop: "A fixed 9:16 crop from the center of the video.",
+    original: "Keep the source dimensions and framing.",
+  }[$("clip-mode").value];
+}
+$("clip-mode").addEventListener("change", updateClipFormatHelp);
 $("generate-clips").addEventListener("click", async () => {
   const id = state.active,
     version = loadVersion;
   $("generate-clips").disabled = true;
   try {
-    const job = await api(`/api/jobs/${id}/clips`, { method: "POST" });
+    const job = await api(`/api/jobs/${id}/clips`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: $("clip-mode").value }),
+    });
     if (version !== loadVersion) return;
     resetClips();
     state.jobs = state.jobs.map((j) => (j.id === id ? job : j));

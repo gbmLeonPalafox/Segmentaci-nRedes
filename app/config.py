@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class LLMConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     api_key: str = Field(default="", repr=False, exclude=True)
-    model: str = Field(default="gpt-5.6-terra", min_length=1, max_length=150)
+    model: str = Field(default="gpt-5.5", min_length=1, max_length=150)
     timeout_seconds: int = Field(default=180, ge=10, le=600)
     max_input_chars: int = Field(default=32000, ge=4000, le=100000)
 

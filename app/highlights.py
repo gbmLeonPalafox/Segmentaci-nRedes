@@ -6,7 +6,9 @@ import json
 import logging
 import math
 import re
+import unicodedata
 from datetime import UTC, datetime
+from itertools import groupby
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -53,20 +55,77 @@ def transcript_hash(transcript):
     return hashlib.sha256(json.dumps(transcript, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def normalized_letters(text):
+    """Ignore punctuation, casing, and accent encoding only while aligning source words."""
+    return "".join(c for c in unicodedata.normalize("NFKD", text).casefold() if c.isalnum())
+
+
+def punctuated_words(segment):
+    """Recover source text slices at existing word times, without changing the transcript."""
+    words = segment["words"]
+    text = segment.get("text", "")
+    tokens = [normalized_letters(word["word"]) for word in words]
+    if not text:
+        return words
+    if not all(tokens) or "".join(tokens) != normalized_letters(text):
+        # A word can be assigned to a neighboring API segment, or spelling can differ.
+        # Do not guess an internal timestamp for text that cannot be aligned exactly.
+        return [{
+            "word": text, "start": segment.get("start", words[0]["start"]),
+            "end": segment.get("end", words[-1]["end"]), "source_piece": True,
+        }]
+    positions = [index for index, char in enumerate(text) for _ in normalized_letters(char)]
+    pieces, start, letters = [], 0, 0
+    for index, (word, token) in enumerate(zip(words, tokens, strict=True)):
+        letters += len(token)
+        if index == len(words) - 1:
+            end = len(text)
+        else:
+            lexical_end = positions[letters - 1] + 1
+            next_start = positions[letters]
+            separator = text[lexical_end:next_start]
+            space = re.search(r"\s", separator)
+            # Keep closing punctuation with this word, and opening punctuation after
+            # a space with the next word (e.g. "idea. ¿Por qué?").
+            end = lexical_end + space.start() if space else next_start
+        pieces.append({**word, "word": text[start:end], "source_piece": True})
+        start = end
+    return pieces
+
+
 def transcript_units(transcript):
-    """Build complete sentences across Whisper segments; never cut at an arbitrary word count."""
+    """Build source-punctuated sentences across segments, preserving available word times."""
     units, pending = [], []
 
     def append(items):
         if not items:
-            return
+            return True
         words = [word for word, _ in items]
         start, end = float(words[0]["start"]), float(words[-1]["end"])
-        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
-            return
-        pieces = [w["word"] for w in words]
-        text = ("".join(pieces) if any(p[:1].isspace() for p in pieces) else " ".join(pieces)).strip()
-        if text:
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+            return True
+        text_parts = []
+        for _, group in groupby(items, key=lambda item: item[1]):
+            group_words = [word for word, _ in group]
+            pieces = [word["word"] for word in group_words]
+            source_pieces = all(word.get("source_piece") for word in group_words)
+            joined = "".join(pieces) if source_pieces or any(p[:1].isspace() for p in pieces) else " ".join(pieces)
+            text_parts.append(joined.strip())
+        text = " ".join(text_parts).strip()
+        if not text:
+            return True
+        if end == start:
+            # Whisper can give a whole short utterance a single zero-length time.
+            # Retain its text beside the preceding unit, or wait for the next one.
+            if not units:
+                return False
+            previous = units[-1]
+            previous["text"] += " " + text
+            previous["end"] = max(previous["end"], end)
+            previous["segment_ids"] = list(dict.fromkeys(
+                previous["segment_ids"] + [sid for _, sid in items]
+            ))
+        else:
             units.append(
                 {
                     "id": f"u{len(units) + 1:06}",
@@ -76,21 +135,23 @@ def transcript_units(transcript):
                     "segment_ids": list(dict.fromkeys(sid for _, sid in items)),
                 }
             )
+        return True
 
     for segment in transcript["segments"]:
         words = segment.get("words")
         if not words:
             # Older transcripts without word timings can only select whole segments.
-            append(pending)
-            pending = []
-            append(
-                [({"word": segment["text"], "start": segment["start"], "end": segment["end"]}, segment["id"])]
+            if append(pending):
+                pending = []
+            pending.append(
+                ({"word": segment["text"], "start": segment["start"], "end": segment["end"]}, segment["id"])
             )
+            if append(pending):
+                pending = []
             continue
-        for word in words:
+        for word in punctuated_words(segment):
             pending.append((word, segment["id"]))
-            if re.search(r"[.!?。！？][\"'”’)\]]*$", word["word"].strip()):
-                append(pending)
+            if re.search(r"[.!?。！？][\"'”’)\]]*$", word["word"].strip()) and append(pending):
                 pending = []
     append(pending)
     return units
@@ -302,7 +363,7 @@ class HighlightRunner:
                 "model": settings.llm.model,
                 "created_at": datetime.now(UTC).isoformat(),
                 "transcript_sha256": transcript_hash(transcript),
-                "unit_version": 2,
+                "unit_version": 3,
                 "options": options.model_dump(),
                 "summary": summary,
                 "usage": totals,

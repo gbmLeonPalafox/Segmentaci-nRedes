@@ -70,7 +70,7 @@
       <div class="sidebar-bottom">
         <span class="status-dot"></span>
         <div>
-          Runs on your machine<small>Local Whisper transcription</small>
+          Runs on your machine<small>OpenAI transcription & highlights</small>
         </div>
       </div>
     </aside>
@@ -105,7 +105,7 @@
           </li>
           <li data-step="transcribe">
             <span class="step-number">3</span
-            ><span>Transcribe<small>Whisper, locally</small></span>
+            ><span>Transcribe<small>Timestamped with Whisper</small></span>
           </li>
           <li data-step="complete">
             <span class="step-number">4</span
@@ -166,7 +166,7 @@
                   <strong id="file-title">Drop your video here</strong
                   ><span id="file-description"
                     >or <u>browse files</u> to get started</span
-                  ><small>MP4, MOV, MKV, WebM & more · Up to 2 GB</small>
+                  ><small>MP4, MOV, MKV, WebM & more · Up to <span id="upload-limit">5 GB</span></small>
                 </label>
               </div>
               <div
@@ -198,13 +198,8 @@
               </div>
               <div class="options-grid">
                 <label class="field-label" for="model"
-                  >Whisper model<select id="model">
-                    <option value="tiny">Tiny · fastest</option>
-                    <option value="base" selected>Base · balanced</option>
-                    <option value="small">Small · more accurate</option>
-                    <option value="medium">Medium · slower</option>
-                    <option value="large-v3">Large v3 · most accurate</option>
-                    <option value="turbo">Turbo · larger model</option>
+                  >Transcription<select id="model" disabled>
+                    <option value="whisper-1" selected>Whisper API · OpenAI</option>
                   </select></label
                 ><label class="field-label" for="language"
                   >Spoken language<select id="language">
@@ -223,9 +218,8 @@
                   </select></label
                 >
               </div>
-              <p class="model-note">
-                First use downloads the selected model. Larger models need more
-                time and memory.
+              <p class="model-note" id="model-note">
+                Whisper API uses your OpenAI key from config.toml. Long recordings are split automatically.
               </p>
               <div
                 id="form-error"
@@ -236,8 +230,8 @@
               <button type="submit" class="primary-button" id="submit-button">
                 <span>Create transcript</span><svg><use href="#i-arrow" /></svg>
               </button>
-              <p class="privacy-note">
-                Transcription runs locally. No API key required.
+              <p class="privacy-note" id="transcription-privacy">
+                Whisper API sends audio to OpenAI and uses paid API credits.
               </p>
             </form>
           </div>
@@ -339,7 +333,7 @@
             <p id="progress-message"></p>
             <div id="job-error" class="error-message" hidden></div>
             <button id="retry-button" class="secondary-button" hidden>
-              Try again
+              Retry with Whisper API
             </button>
           </div>
           <div class="editor-layout">
@@ -473,7 +467,7 @@
                 <div class="highlight-action-row">
                   <p>
                     Transcript text is sent to OpenAI when you generate
-                    highlights. Video and audio stay local.
+                    highlights. Transcription sends audio to OpenAI using the same key.
                   </p>
                   <button
                     class="primary-button"
@@ -516,10 +510,13 @@
               <div class="clip-controls">
                 <div>
                   <h3>Turn these passages into clips</h3>
-                  <p>
-                    MP4 exports at the original dimensions. No cropping or
-                    resizing.
-                  </p>
+                  <p id="clip-format-help">Gently follows one person; stacks two people only while both are on screen.</p>
+                  <label for="clip-mode">Export format</label>
+                  <select id="clip-mode" aria-describedby="clip-format-help">
+                    <option value="face_follow">Vertical · Face follow (9:16)</option>
+                    <option value="center_crop">Vertical · Center crop (9:16)</option>
+                    <option value="original">Original dimensions</option>
+                  </select>
                 </div>
                 <button
                   type="button"

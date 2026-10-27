@@ -1,18 +1,17 @@
 [project]
 name = "video-transcript-studio"
 version = "0.1.0"
-description = "Local video ingestion and timestamped Whisper transcription"
+description = "Video ingestion, OpenAI Whisper transcription, and GPT-5.5 clip selection"
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
   "python-multipart>=0.0.20",
-  "faster-whisper>=1.2,<2",
-  # faster-whisper 1.2.1 uses an av.open argument removed in PyAV 19.
   "av>=16,<19",
   "yt-dlp[default]>=2026.3.17",
   "imageio-ffmpeg>=0.6,<1",
   "openai>=2,<3",
+  "opencv-python-headless>=4.10,<5",
 ]
 
 [dependency-groups]

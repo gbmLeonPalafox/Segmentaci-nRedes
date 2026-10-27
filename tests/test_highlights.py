@@ -41,7 +41,7 @@ def transcript():
 def configured(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     path = tmp_path / "config.toml"
-    path.write_text('[llm]\napi_key = "test-secret-never-expose"\nmodel = "test-model"\n')
+    path.write_text('[llm]\napi_key = "test-secret-never-expose"\n')
     return path
 
 
@@ -176,7 +176,7 @@ def test_real_sdk_request_and_pipeline_exports(configured, tmp_path, transcript,
     def respond(request):
         payload = json.loads(request.content)
         captured.append(payload)
-        assert payload["model"] == "test-model"
+        assert payload["model"] == "gpt-5.5"
         assert payload["store"] is False
         assert payload["text"]["format"]["type"] == "json_schema"
         assert payload["text"]["format"]["strict"] is True
@@ -188,7 +188,7 @@ def test_real_sdk_request_and_pipeline_exports(configured, tmp_path, transcript,
                 "created_at": 1,
                 "object": "response",
                 "status": "completed",
-                "model": "test-model",
+                "model": "gpt-5.5",
                 "output": [
                     {
                         "id": "msg_1",
@@ -422,3 +422,97 @@ def test_long_sentence_is_not_cut_at_arbitrary_word_count():
     words[-1]["word"] += "."
     units = transcript_units({"segments": [{"id": "a", "words": words}]})
     assert len(units) == 1 and units[0]["end"] == 50
+
+
+def test_api_words_get_sentence_boundaries_and_text_from_segment():
+    original = {
+        "segments": [{
+            "id": "a", "start": 0, "end": 9,
+            "text": "Una idea. ¿Por qué? Es útil.",
+            "words": [
+                {"word": word, "start": index, "end": index + 0.8}
+                for index, word in enumerate(["Una", "idea", "Por", "qué", "Es", "útil"])
+            ],
+        }],
+    }
+    before = json.dumps(original, sort_keys=True)
+    units = transcript_units(original)
+    assert [(u["text"], u["start"], u["end"]) for u in units] == [
+        ("Una idea.", 0, 1.8), ("¿Por qué?", 2, 3.8), ("Es útil.", 4, 5.8),
+    ]
+    assert json.dumps(original, sort_keys=True) == before
+    assert [u["id"] for u in units] == ["u000001", "u000002", "u000003"]
+
+
+def test_api_punctuation_preserves_negation_across_segment_boundaries():
+    data = {"segments": [
+        {"id": "a", "text": "No porque", "words": [
+            {"word": "No", "start": 0, "end": 1},
+            {"word": "porque", "start": 1, "end": 2},
+        ]},
+        {"id": "b", "text": "puedas delegarlo. Aprende primero.", "words": [
+            {"word": "puedas", "start": 2, "end": 3},
+            {"word": "delegarlo", "start": 3, "end": 4},
+            {"word": "Aprende", "start": 4, "end": 5},
+            {"word": "primero", "start": 5, "end": 6},
+        ]},
+    ]}
+    units = transcript_units(data)
+    assert units[0]["text"] == "No porque puedas delegarlo."
+    assert units[0]["segment_ids"] == ["a", "b"]
+    assert units[0]["start"] == 0 and units[0]["end"] == 4
+    assert units[1]["text"] == "Aprende primero."
+
+
+def test_unaligned_api_words_fall_back_to_source_segment_without_inventing_times():
+    data = {"segments": [{
+        "id": "a", "start": 10, "end": 18, "text": "Una idea. Otra explicación.",
+        "words": [{"word": "Palabras", "start": 11, "end": 12}],
+    }]}
+    units = transcript_units(data)
+    assert len(units) == 1
+    assert units[0]["text"] == "Una idea. Otra explicación."
+    assert units[0]["start"] == 10 and units[0]["end"] == 18
+
+
+def test_api_alignment_handles_decimals_unicode_and_text_without_spaces():
+    for text, words, expected in [
+        ("Cuesta 3.14. Está bien.", ["Cuesta", "3.14", "Está", "bien"], ["Cuesta 3.14.", "Está bien."]),
+        ("Café listo. Sí.", ["Cafe\u0301", "listo", "Si\u0301"], ["Café listo.", "Sí."]),
+        ("你好。再见！", ["你好", "再见"], ["你好。", "再见！"]),
+    ]:
+        units = transcript_units({"segments": [{
+            "id": "a", "text": text, "words": [
+                {"word": word, "start": index, "end": index + 1} for index, word in enumerate(words)
+            ],
+        }]})
+        assert [u["text"] for u in units] == expected
+
+
+def test_many_api_segments_no_longer_merge_into_one_unselectable_unit():
+    data = {"segments": [
+        {"id": f"s{i}", "text": "Una idea completa.", "words": [
+            {"word": word, "start": i * 5 + j, "end": i * 5 + j + 1}
+            for j, word in enumerate(["Una", "idea", "completa"])
+        ]} for i in range(100)
+    ]}
+    units = transcript_units(data)
+    assert len(units) == 100
+    selected, errors = resolve_candidates(batch(end="u000005"), units, HighlightOptions())
+    assert not errors
+    assert selected[0]["duration"] == 23
+    assert selected[0]["text"].count("Una idea completa.") == 5
+
+
+def test_zero_duration_api_utterances_are_retained_with_neighboring_units():
+    units = transcript_units({"segments": [
+        {"id": "a", "text": "Sí.", "words": [{"word": "Sí", "start": 0, "end": 0}]},
+        {"id": "b", "text": "Una idea.", "words": [
+            {"word": "Una", "start": 1, "end": 2}, {"word": "idea", "start": 2, "end": 3},
+        ]},
+        {"id": "c", "text": "Claro.", "words": [{"word": "Claro", "start": 3, "end": 3}]},
+    ]})
+    assert len(units) == 1
+    assert units[0]["text"] == "Sí. Una idea. Claro."
+    assert units[0]["segment_ids"] == ["a", "b", "c"]
+    assert units[0]["start"] == 0 and units[0]["end"] == 3

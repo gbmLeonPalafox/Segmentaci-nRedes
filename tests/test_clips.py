@@ -109,7 +109,14 @@ def test_clips_render_accurate_ranges_dimensions_and_downloads(tmp_path, media):
         # The first source second is red. The selected interval starts between keyframes in blue.
         first = data["clips"][0]
         with av.open(str(folder / data["directory"] / first["filename"])) as video:
-            rgb = next(video.decode(video=0)).to_ndarray(format="rgb24").mean(axis=(0, 1))
+            frame = next(video.decode(video=0)).reformat(format="rgb24")
+            plane = frame.planes[0]
+            raw = bytes(plane)
+            pixels = b"".join(
+                raw[row * plane.line_size:row * plane.line_size + frame.width * 3]
+                for row in range(frame.height)
+            )
+            rgb = [sum(pixels[channel::3]) / (frame.width * frame.height) for channel in range(3)]
             assert rgb[2] > 200 and rgb[0] < 20
         preview = client.get(
             "/api/jobs/video-test/clips/highlight_001/media", headers={"Range": "bytes=0-99"}
@@ -144,6 +151,33 @@ def test_changed_highlights_cannot_download_old_clips(tmp_path, media):
         (folder / "highlights.json").write_text(json.dumps(data))
         assert client.get("/api/jobs/video-test/clips").status_code == 409
         assert client.get("/api/jobs/video-test/clips/highlight_001/media").status_code == 409
+
+
+@pytest.mark.parametrize("mode", ["center_crop", "face_follow"])
+def test_vertical_modes_are_saved_validated_and_rendered(tmp_path, media, mode):
+    app = create_app(tmp_path / "data")
+    seed(app, media)
+    with TestClient(app) as client:
+        assert client.post("/api/jobs/video-test/clips", json={"mode": "unknown"}).status_code == 422
+        assert client.get("/api/jobs/video-test").json().get("clips_status") is None
+        response = client.post("/api/jobs/video-test/clips", json={"mode": mode})
+        assert response.status_code == 202
+        assert response.json()["clips_mode"] == mode
+        job = wait_clips(client)
+        assert job["clips_status"] == "completed", job
+        batch = client.get("/api/jobs/video-test/clips").json()
+        assert batch["mode"] == mode
+        for clip in batch["clips"]:
+            assert clip["width"] * 16 == clip["height"] * 9
+            assert clip["framing"]["mode"] == mode
+            if mode == "face_follow":
+                assert clip["framing"]["fallback"] == "center_crop"
+        # An explicit original export must replace the vertical batch cleanly.
+        assert client.post("/api/jobs/video-test/clips", json={"mode": "original"}).status_code == 202
+        assert wait_clips(client)["clips_status"] == "completed"
+        batch = client.get("/api/jobs/video-test/clips").json()
+        assert batch["mode"] == "original"
+        assert all((clip["width"], clip["height"]) == (160, 120) for clip in batch["clips"])
 
 
 def test_delete_removes_all_files_and_metadata_only_for_selected_video(tmp_path, media):

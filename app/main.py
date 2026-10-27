@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -21,21 +22,38 @@ from app.config import HighlightOptions
 from app.highlights import HighlightRunner, export_highlights
 from app.pipeline import MODELS, Pipeline, export_transcript, youtube_url
 from app.store import Store
+from app.transcription import LANGUAGES
+from app.uploads import CHUNK_BYTES, VIDEO_SUFFIXES, Uploads
 
 STATIC = Path(__file__).parent / "static"
-MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_BYTES", str(2 * 1024**3)))
+MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_BYTES", str(5 * 1024**3)))
 LANGUAGE = re.compile(r"[a-z]{2,3}")
 
 
 class YouTubeInput(BaseModel):
     url: str = Field(max_length=2048)
-    model: str = "base"
+    model: str = "whisper-1"
     language: str = ""
+
+
+class UploadInput(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    size: int = Field(gt=0)
+    model: str = "whisper-1"
+    language: str = ""
+
+
+class RetryInput(BaseModel):
+    model: str | None = None
+
+
+class ClipInput(BaseModel):
+    mode: Literal["original", "center_crop", "face_follow"] = "original"
 
 
 def create_app(data_dir=None, config_path=None):
     store = Store(Path(data_dir or os.getenv("DATA_DIR", "data")).resolve())
-    pipeline = Pipeline(store)
+    pipeline = Pipeline(store, config_path)
     highlight_runner = HighlightRunner(store, config_path)
     clip_runner = ClipRunner(store)
     lifecycle_lock = threading.RLock()
@@ -95,8 +113,10 @@ def create_app(data_dir=None, config_path=None):
                     highlights_message="Selection interrupted.",
                 )
             if job["status"] in {"queued", "running"}:
-                store.update(job["id"], status="queued", progress=0, message="Resuming after restart…")
-                executor.submit(pipeline.run, job["id"])
+                store.update(
+                    job["id"], status="failed", message="Transcription interrupted.",
+                    error="Server restarted. Retry to transcribe with OpenAI Whisper API.",
+                )
         yield
         executor.shutdown(wait=True)
         llm_executor.shutdown(wait=True)
@@ -116,21 +136,23 @@ def create_app(data_dir=None, config_path=None):
 
     def options(model, language):
         if model not in MODELS:
-            raise HTTPException(422, "Choose a supported Whisper model.")
+            raise HTTPException(422, "Transcription uses OpenAI Whisper API (whisper-1).")
+        try:
+            settings = highlight_runner.settings()
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        if not settings.llm.api_key:
+            raise HTTPException(422, "Add your OpenAI API key to [llm] api_key in config.toml.")
         language = language.strip().lower()
-        if language and not LANGUAGE.fullmatch(language):
-            raise HTTPException(422, "Use a language code such as en or es, or select Auto-detect.")
-        if language:
-            from faster_whisper.tokenizer import _LANGUAGE_CODES
-
-            if language not in _LANGUAGE_CODES:
-                raise HTTPException(422, "This language is not supported by Whisper.")
+        if language and (not LANGUAGE.fullmatch(language) or language not in LANGUAGES):
+            raise HTTPException(422, "Use a supported language code such as en or es, or select Auto-detect.")
         return language
 
-    def new_job(source_type, title, model, language, **extra):
+    def new_job(source_type, title, model, language, create_folder=True, **extra):
         job_id = uuid.uuid4().hex
         folder = store.root / job_id
-        folder.mkdir()
+        if create_folder:
+            folder.mkdir()
         job = {
             "id": job_id,
             "title": title,
@@ -151,6 +173,47 @@ def create_app(data_dir=None, config_path=None):
         store.save(job)
         app.state.executor.submit(pipeline.run, job["id"])
         return job
+
+    uploads = Uploads(store, enqueue)
+
+    @app.post("/api/uploads", status_code=201)
+    @serialized
+    def begin_upload(body: UploadInput):
+        language = options(body.model, body.language)
+        if body.size > MAX_UPLOAD:
+            raise HTTPException(413, "Video exceeds the configured upload size limit.")
+        filename = Path(body.filename).name
+        suffix = Path(filename).suffix.lower()
+        if suffix not in VIDEO_SUFFIXES:
+            raise HTTPException(422, "Choose a supported video file.")
+        job, _ = new_job(
+            "upload", filename, body.model, language,
+            create_folder=False, source_file=f"source{suffix}",
+        )
+        return uploads.create(job, body.size)
+
+    @serialized
+    def append_upload(upload_id, offset, data):
+        return uploads.append(upload_id, offset, data)
+
+    @app.put("/api/uploads/{upload_id}")
+    async def upload_part(upload_id: str, offset: int, request: Request):
+        data = bytearray()
+        async for part in request.stream():
+            if len(data) + len(part) > CHUNK_BYTES:
+                raise HTTPException(413, "Upload chunk exceeds the size limit.")
+            data.extend(part)
+        return await asyncio.to_thread(append_upload, upload_id, offset, data)
+
+    @app.delete("/api/uploads/{upload_id}")
+    @serialized
+    def cancel_upload(upload_id: str):
+        return uploads.cancel(upload_id)
+
+    @app.post("/api/uploads/{upload_id}/complete", status_code=202)
+    @serialized
+    def finish_upload(upload_id: str):
+        return uploads.complete(upload_id)
 
     @app.get("/api/health")
     def health():
@@ -207,13 +270,13 @@ def create_app(data_dir=None, config_path=None):
             if not upload or not hasattr(upload, "read"):
                 raise HTTPException(422, "Select a video file to upload.")
             upload: UploadFile
-            model = str(form.get("model", "base"))
+            model = str(form.get("model", "whisper-1"))
             language = options(model, str(form.get("language", "")))
             if upload.size is not None and upload.size > MAX_UPLOAD:
-                raise HTTPException(413, "Video exceeds the 2 GB upload limit.")
+                raise HTTPException(413, "Video exceeds the configured upload size limit.")
             filename = Path(upload.filename or "video").name
             suffix = Path(filename).suffix.lower()
-            if suffix not in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".mts"}:
+            if suffix not in VIDEO_SUFFIXES:
                 raise HTTPException(422, "Choose an MP4, MOV, MKV, WebM, AVI, M4V, MPEG, or MTS video.")
             job, folder = new_job("upload", filename, model, language, source_file=f"source{suffix}")
             try:
@@ -271,13 +334,16 @@ def create_app(data_dir=None, config_path=None):
 
     @app.post("/api/jobs/{job_id}/retry", status_code=202)
     @serialized
-    def retry(job_id: str):
+    def retry(job_id: str, body: RetryInput | None = None):
         job = get_job(job_id)
         if job["status"] != "failed":
             raise HTTPException(409, "Only failed jobs can be retried.")
+        model = body.model if body and body.model is not None else "whisper-1"
+        options(model, job.get("language", ""))
         job = store.update(
             job_id,
             expected_status="failed",
+            model=model,
             status="queued",
             stage="acquire",
             progress=0,
@@ -379,7 +445,7 @@ def create_app(data_dir=None, config_path=None):
 
     @app.post("/api/jobs/{job_id}/clips", status_code=202)
     @serialized
-    def generate_clips(job_id: str):
+    def generate_clips(job_id: str, options: ClipInput | None = None):
         job = get_job(job_id)
         if job["status"] != "completed" or job.get("highlights_status") != "completed":
             raise HTTPException(409, "Finish transcription and highlight selection before generating clips.")
@@ -395,6 +461,7 @@ def create_app(data_dir=None, config_path=None):
             clips_progress=0,
             clips_error=None,
             clips_message="Queued for clip rendering…",
+            clips_mode=options.mode if options else "original",
         )
         app.state.clip_executor.submit(clip_runner.run, job_id)
         return job
