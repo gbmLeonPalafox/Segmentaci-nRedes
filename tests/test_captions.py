@@ -95,7 +95,8 @@ def test_accumulation_holds_previous_words_until_block_reset(tmp_path):
     assert r"{\alpha&HFF&\fscx100\fscy100}me" in events[0]
     assert r"{\alpha&H00&\fscx100\fscy100}Hola" in events[1]
     assert "0:00:00.00,0:00:00.30" in events[0]  # Remains through the inter-word gap.
-    assert "Hola" in events[4] and "Pablo." in events[4]
+    assert "Hola" in events[4] and "Pablo" in events[4]
+    assert "Pablo." not in events[4]
     assert "Hola" not in events[5] and "Otra" in events[5]
     assert r"\N" in events[0]  # Full phrase uses a fixed two-line layout from the start.
 
@@ -120,3 +121,29 @@ def test_caption_size_stays_uniform_across_short_and_long_phrases(tmp_path):
     assert {re.search(r"\\fs([\d.]+)", line)[1] for line in events} == {"84.24"}
     assert all(r"\fscx98\fscy98" in line for line in events)
     assert all(r"\t(0,80,\fscx100\fscy100)" in line for line in events)
+
+
+def test_subtitle_display_strips_punctuation_preserving_questions_and_source(tmp_path):
+    from app.captions import subtitle_text
+
+    assert subtitle_text('¡“Hola”, señor! ¿Cómo estás?… (bien); sí: café—té / fin.') == (
+        'Hola señor ¿Cómo estás? bien sí cafété  fin'
+    )
+    assert subtitle_text("don't co-operate a_b [x] {y} \\ / $ + =") == "dont cooperate ab x y"
+    words = [{"word": word, "start": i * .3, "end": (i + 1) * .3}
+             for i, word in enumerate(["¡Hola,", "mundo!", "—", "¿Qué", "tal?"])]
+    before = copy.deepcopy(words)
+    path = tmp_path / "clean.ass"
+    result = write_ass(path, words, 0, 2, 1080, 1920)
+    text = path.read_text()
+    assert "Style: Default,Roboto," in text
+    assert "&H80000000,-1," in text  # ASS bold style.
+    assert "¿Qué" in text and "tal?" in text
+    assert all(punctuation not in text for punctuation in ["¡", "Hola,", "mundo!", "—"])
+    assert result["word_count"] == 4
+    assert words == before
+
+
+def test_subtitle_display_rejects_punctuation_only_clip(tmp_path):
+    with pytest.raises(ValueError, match="No visible words"):
+        write_ass(tmp_path / "empty.ass", [{"word": "…", "start": 0, "end": .2}], 0, 1, 360, 640)

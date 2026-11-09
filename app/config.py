@@ -3,6 +3,7 @@
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -19,6 +20,12 @@ class LLMConfig(BaseModel):
 
 class HighlightOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    prompt_id: str | None = Field(default=None, max_length=100)
+    prompt_version: int | None = Field(default=None, ge=1)
+    personalization_id: str | None = Field(default=None, max_length=100)
+    audience_kind: Literal["unspecified", "human", "synthetic"] = "unspecified"
+    audience_context: str = Field(default="", max_length=4000)
+    campaign_context: str = Field(default="", max_length=4000)
     max_count: int = Field(default=5, ge=1, le=15)
     min_seconds: int = Field(default=20, ge=1, le=300)
     max_seconds: int = Field(default=90, ge=5, le=600)
@@ -26,7 +33,7 @@ class HighlightOptions(BaseModel):
         default="Select the most useful insights, memorable stories, and actionable takeaways for social media. "
         "Each passage should make sense on its own and communicate a complete idea.",
         min_length=10,
-        max_length=2000,
+        max_length=12000,
     )
 
     def check_range(self):

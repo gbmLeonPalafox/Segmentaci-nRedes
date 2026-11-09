@@ -1619,6 +1619,36 @@ footer > span:last-child {
   grid-template-columns: repeat(3, 1fr);
   gap: 18px;
 }
+.prompt-selectors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 18px 0;
+}
+.prompt-selectors label { flex: 1; min-width: 160px; font-size: 12px; color: #6a7d5c; }
+.prompt-selectors select {
+  display: block; width: 100%; margin-top: 7px; padding: 10px;
+  border: 1px solid #dce4d3; border-radius: 5px; background: #fafcf7; color: #385333;
+}
+.prompt-help { font-size: 12px; line-height: 1.7; color: #6a7d5c; }
+.prompt-help summary { cursor: pointer; margin-top: 12px; }
+.duration-options { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 18px; }
+.personalization-panel { margin-top: 24px; padding-top: 18px; border-top: 1px solid #dde5d3; }
+.personalization-panel > summary { cursor: pointer; font-size: 14px; color: #385333; }
+.personalization-panel pre { white-space: pre-wrap; font: inherit; line-height: 1.7; }
+.personalization-panel input, .personalization-panel select, .clip-feedback input,
+.clip-feedback select, .clip-feedback textarea {
+  display: block; width: 100%; margin: 7px 0 14px; padding: 10px;
+  border: 1px solid #dce4d3; border-radius: 5px; background: #fafcf7; color: #385333;
+}
+.personalization-panel button { margin-top: 14px; }
+.clip-feedback { border-top: 1px solid #dde5d3; margin-top: 20px; padding-top: 14px; font-size: 12px; }
+.clip-feedback summary { cursor: pointer; color: #385333; }
+.clip-feedback form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.clip-feedback label { min-width: 0; }
+.clip-feedback p, #prompt-evidence p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.clip-feedback a { color: #416932; }
+@media (max-width: 600px) { .clip-feedback form { grid-template-columns: 1fr; } }
 .highlight-options label {
   font-size: 12px;
   color: #6a7d5c;

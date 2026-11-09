@@ -516,3 +516,83 @@ def test_zero_duration_api_utterances_are_retained_with_neighboring_units():
     assert units[0]["text"] == "Sí. Una idea. Claro."
     assert units[0]["segment_ids"] == ["a", "b", "c"]
     assert units[0]["start"] == 0 and units[0]["end"] == 3
+
+
+def test_profile_versions_persist_and_reject_conflicts(configured, tmp_path):
+    root = tmp_path / "data"
+    app = create_app(root, config_path=configured)
+    with TestClient(app) as client:
+        catalog = client.get("/api/prompts").json()
+        assert {p["area"] for p in catalog} == {"acquisition", "activation"}
+        profile = catalog[0]
+        original = profile["revisions"][0]
+        body = {"base_version": 1, "objective": "Un objetivo editorial nuevo y específico.",
+                "min_seconds": 10, "max_seconds": 50}
+        response = client.post(f"/api/prompts/{profile['id']}/revisions", json=body)
+        assert response.status_code == 201
+        assert response.json()["revisions"][0] == original
+        assert response.json()["revisions"][-1]["version"] == 2
+        assert client.post(f"/api/prompts/{profile['id']}/revisions", json=body).status_code == 409
+        assert client.post("/api/prompts/unknown/revisions", json=body).status_code == 404
+        assert client.post(f"/api/prompts/{profile['id']}/revisions",
+                           json=body | {"min_seconds": 90}).status_code == 422
+    with TestClient(create_app(root, config_path=configured)) as client:
+        assert len(client.get("/api/prompts").json()[0]["revisions"]) == 2
+
+
+def test_profile_resolves_on_server_and_saves_audience_and_snapshot(configured, tmp_path, transcript, monkeypatch):
+    calls = []
+
+    def reply(client, model, instructions, payload, schema):
+        calls.append(payload)
+        return batch(), None
+
+    monkeypatch.setattr("app.highlights.ask_model", reply)
+    app = create_app(tmp_path / "data", config_path=configured)
+    seed(app, transcript)
+    with TestClient(app) as client:
+        profile = client.get("/api/prompts").json()[0]
+        revision = profile["revisions"][0]
+        response = client.post("/api/jobs/test-video/highlights", json={
+            "prompt_id": profile["id"], "prompt_version": 1,
+            "objective": "This override must not replace the saved profile.",
+            "min_seconds": 200, "max_seconds": 300,
+            "audience_kind": "synthetic", "audience_context": "Personas con poco conocimiento previo.",
+        })
+        assert response.status_code == 202
+        job = wait_for_highlights(client, "test-video")
+        assert job["highlights_status"] == "completed", job
+        result = client.get("/api/jobs/test-video/highlights").json()
+        assert result["prompt"]["version"] == 1
+        assert result["prompt"]["area"] == "acquisition"
+        assert result["options"]["min_seconds"] == revision["min_seconds"]
+        assert calls[0]["objective"] == revision["objective"]
+        assert calls[0]["audience"]["kind"] == "synthetic"
+        client.post(f"/api/prompts/{profile['id']}/revisions", json={
+            "base_version": 1, "objective": "A revised objective for future requests.",
+            "min_seconds": 10, "max_seconds": 60,
+        })
+        assert client.get("/api/jobs/test-video/highlights").json() == result
+        assert client.post("/api/jobs/test-video/highlights", json={
+            "prompt_id": profile["id"], "prompt_version": 99,
+        }).status_code == 422
+        assert client.post("/api/jobs/test-video/highlights", json={
+            "prompt_id": "unknown",
+        }).status_code == 422
+
+
+def test_profile_can_resolve_historical_or_latest_revision(tmp_path):
+    from app.prompts import PromptManager, PromptRevision
+
+    manager = PromptManager(tmp_path)
+    profile = manager.catalog()[0]
+    manager.publish(profile["id"], PromptRevision(
+        base_version=1, objective="New editorial objective for selection.", min_seconds=10, max_seconds=50,
+    ))
+    latest, snapshot = manager.resolve(HighlightOptions(), {"prompt_id": profile["id"]})
+    assert latest.prompt_version == snapshot["version"] == 2
+    historical, snapshot = manager.resolve(HighlightOptions(), {
+        "prompt_id": profile["id"], "prompt_version": 1,
+    })
+    assert historical.objective == profile["revisions"][0]["objective"]
+    assert snapshot["version"] == 1

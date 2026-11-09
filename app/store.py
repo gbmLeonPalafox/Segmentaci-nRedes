@@ -47,3 +47,5 @@ class Store:
     def delete(self, job_id):
         with self.lock, self.connect() as db:
             db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='clip_results'").fetchone():
+                db.execute("DELETE FROM clip_results WHERE job_id = ?", (job_id,))

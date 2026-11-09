@@ -2,6 +2,8 @@
 
 import math
 import re
+import string
+import unicodedata
 
 
 def caption_words(transcript):
@@ -93,6 +95,14 @@ def escape_ass(text):
     return text.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\n", " ").replace("\r", " ")
 
 
+def subtitle_text(text):
+    """Remove display punctuation while preserving Spanish and English questions."""
+    return "".join(
+        char for char in text
+        if char in "?¿" or (char not in string.punctuation and not unicodedata.category(char).startswith("P"))
+    ).strip()
+
+
 def phrase_groups(cues):
     """Purely local boundaries: sentences, pauses, punctuation after 5, cap at 8."""
     groups, current = [], []
@@ -110,7 +120,7 @@ def phrase_groups(cues):
 
 
 def text_width(text):
-    """Conservative Arial bold width estimate in ems; no font/API dependency."""
+    """Conservative bold text width estimate in ems; no font/API dependency."""
     total = 0
     for char in text:
         if char in " ilI.,:;!'|":
@@ -126,7 +136,7 @@ def text_width(text):
 
 def phrase_layout(group, available=14):
     """Pre-plan at most two balanced lines, including unrevealed words."""
-    texts = [escape_ass(cue["word"]) for cue in group]
+    texts = [escape_ass(subtitle_text(cue["word"])) for cue in group]
     if len(texts) == 1:
         return texts, None
     # A short phrase remains on one line; larger blocks use two fixed lines.
@@ -144,6 +154,8 @@ def layout_groups(cues, available):
     for group in phrase_groups(cues):
         current = []
         for cue in group:
+            if not subtitle_text(cue["word"]):
+                continue
             candidate = current + [cue]
             texts, split = phrase_layout(candidate, available)
             longest = max(text_width(" ".join(texts[:split])), text_width(" ".join(texts[split:])))
@@ -173,12 +185,14 @@ WrapStyle: 2
 ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,{size:.2f},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline:.2f},0,5,0,0,0,1
+Style: Default,Roboto,{size:.2f},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline:.2f},0,5,0,0,0,1
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
     groups = layout_groups(cues, available)
+    if not groups:
+        raise ValueError("No visible words are available for subtitles in this clip.")
     for group_index, group in enumerate(groups):
         texts, split = phrase_layout(group, available)
         longest = max(text_width(" ".join(texts[:split])), text_width(" ".join(texts[split:])))
@@ -209,4 +223,4 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             lines.append(f"Dialogue: 0,{ass_time(cue['start'])},{ass_time(until)},"
                          f"Default,,0,0,0,,{positioning}{''.join(pieces)}")
     path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
-    return {"mode": "dynamic", "word_count": len(cues)}
+    return {"mode": "dynamic", "word_count": sum(len(group) for group in groups)}

@@ -8,3 +8,12 @@ License: MIT; see YUNET_LICENSE.txt in this directory.
 
 The model runs locally through OpenCV. Exporting does not download models or
 send video frames to a service. Preserve the model and its license together.
+
+Bundled Roboto Bold subtitle font
+
+Source: https://github.com/googlefonts/roboto
+Asset: src/hinted/Roboto-Bold.ttf
+License: Apache 2.0; see ROBOTO_LICENSE.txt in this directory.
+
+The renderer copies this font into each subtitle batch's fonts directory and
+loads it through libass, so subtitle exports do not depend on installed fonts.

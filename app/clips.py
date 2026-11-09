@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from app.pipeline import ffmpeg_path, inspect_media
 
@@ -60,9 +61,15 @@ def render_clip(source, destination, start, end, metadata, mode="original", dete
 
         subtitle_file = destination.with_suffix(".ass")
         captions = write_ass(subtitle_file, words, start, end, *expected)
+        # A relative directory avoids FFmpeg filter escaping for installation paths.
+        fonts = destination.parent / "fonts"
+        fonts.mkdir(exist_ok=True)
+        font = fonts / "Roboto-Bold.ttf"
+        if not font.exists():
+            shutil.copyfile(Path(__file__).parent / "assets" / font.name, font)
         # Apply after all crop/stack/scale operations, in clip-relative time.
         expression = (expression + "," if expression else "setpts=PTS-STARTPTS,")
-        expression += f"ass={subtitle_file.name}"
+        expression += f"ass={subtitle_file.name}:fontsdir=fonts"
     filters = ["-vf", expression] if expression else []
     pixel_format = "yuv444p" if expected[0] % 2 or expected[1] % 2 else "yuv420p"
     result = subprocess.run(

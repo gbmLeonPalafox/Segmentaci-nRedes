@@ -210,6 +210,9 @@ function selectJob(id) {
   $("video-player").hidden = true;
   $("media-placeholder").hidden = false;
   const job = state.jobs.find((j) => j.id === id);
+  highlightFormDirty = false;
+  if (llmSettings) fillHighlightOptions(llmSettings.highlights);
+  highlightFormDirty = false;
   if (job) {
     if (job.highlights_options) {
       fillHighlightOptions(job.highlights_options);
@@ -562,27 +565,263 @@ let settingsLastRead = 0;
 let highlightFormDirty = false;
 let highlightedSegmentIds = new Set();
 let highlightEnd = null;
+let promptCatalog = [];
+
+let promptVariant = null;
+let personalizationHistory = [];
+let personalizationBusy = false;
+let personalizationRequest = 0;
+let pendingHighlightOptions = null;
+
+function selectedPrompt() {
+  return promptCatalog.find((p) => p.id === $("clip-area").value);
+}
+function selectedRevision() {
+  return selectedPrompt()?.revisions.find((r) => r.version === Number($("prompt-version").value));
+}
+function adaptationInputs() {
+  return {
+    area: $("clip-area").value,
+    master_version: Number($("prompt-version").value) || null,
+    audience: $("audience-context").value.trim(),
+    min_seconds: Number($("highlight-min").value),
+    max_seconds: Number($("highlight-max").value),
+    prior_learning: $("prior-learning").value.trim(),
+    channel: $("audience-channel").value.trim(),
+    campaign_context: $("campaign-context").value.trim(),
+  };
+}
+function inputFingerprint() { return JSON.stringify(adaptationInputs()); }
+function metricsText(metrics) {
+  const labels = {views: "Reproducciones", interactions: "Interacciones", inquiries: "Consultas"};
+  return Object.entries(metrics || {}).map(([key, value]) => `${labels[key] || key}: ${value}`).join(" · ") || "Sin métricas";
+}
+function invalidatePersonalization() {
+  pendingHighlightOptions = null;
+  personalizationRequest++;
+  promptVariant = null;
+  $("personalization-history").value = "";
+  $("prompt-explanation").replaceChildren();
+  $("prompt-evidence").replaceChildren();
+  $("prompt-status").textContent = "Se usará el maestro con el contexto de audiencia. Puedes proponer o guardar una adaptación.";
+  highlightFormDirty = true;
+}
+function fillVersions(version = null) {
+  const profile = selectedPrompt();
+  $("prompt-version").replaceChildren(...(profile?.revisions || []).map((r) => new Option(`v${r.version}`, r.version)));
+  if (profile) $("prompt-version").value = version || profile.revisions.at(-1).version;
+}
+function applyPrompt(resetDuration = true) {
+  const revision = selectedRevision();
+  invalidatePersonalization();
+  if (!revision) {
+    $("prompt-status").textContent = "Cargando el prompt maestro…";
+    return;
+  }
+  $("master-prompt").textContent = revision.objective;
+  $("highlight-objective").value = revision.objective;
+  if (resetDuration) {
+    $("highlight-min").value = revision.min_seconds;
+    $("highlight-max").value = revision.max_seconds;
+  }
+}
+function showVariant(variant) {
+  promptVariant = variant;
+  $("highlight-objective").value = variant.objective;
+  $("master-prompt").textContent = variant.master.objective;
+  $("prompt-status").textContent = variant.reviewed_at
+    ? `Personalización v${variant.version} revisada y lista para usar.`
+    : "Propuesta pendiente de revisión. Lee o edita el prompt y pulsa Guardar y usar.";
+  if (selectedPrompt()?.revisions.at(-1).version > variant.master.version) {
+    $("prompt-status").textContent += ` Usa el maestro anterior v${variant.master.version}; puedes generar una nueva adaptación con el maestro actual.`;
+  }
+  const explanation = $("prompt-explanation");
+  explanation.replaceChildren();
+  for (const [title, entries] of [["Cambios respecto al maestro", variant.changes], ["Supuestos y límites", variant.assumptions]]) {
+    const heading = document.createElement("strong"); heading.textContent = title;
+    const list = document.createElement("ul");
+    for (const entry of entries || []) { const row = document.createElement("li"); row.textContent = entry; list.append(row); }
+    explanation.append(heading, list);
+  }
+  const evidence = $("prompt-evidence"); evidence.replaceChildren();
+  const heading = document.createElement("strong"); heading.textContent = "Antecedentes consultados"; evidence.append(heading);
+  if (!variant.evidence.length) {
+    const empty = document.createElement("p"); empty.textContent = "Sin resultados relevantes registrados. La propuesta se basa en el maestro y el contexto proporcionado."; evidence.append(empty);
+  }
+  for (const item of variant.evidence) {
+    const row = document.createElement("p");
+    const relevance = item.relevance === "same_audience" ? "Misma audiencia" : "Audiencia similar · referencia indirecta";
+    const source = item.evidence_label === "synthetic_hypothesis" ? "Hipótesis sintética" : "Resultado real reportado";
+    const outcomes = {successful: "Funcionó", unsuccessful: "No funcionó", mixed: "Mixto"};
+    row.textContent = `${relevance} · ${source} · ${outcomes[item.evaluation]} · ${item.channel} · ${item.published_at}\n${item.clip.title}: ${item.feedback || "Sin comentario"}\n${metricsText(item.metrics)}`;
+    evidence.append(row);
+  }
+}
+async function loadPersonalizationHistory() {
+  personalizationHistory = await api("/api/personalizations");
+  $("personalization-history").replaceChildren(new Option("Selecciona una versión revisada", ""),
+    ...personalizationHistory.filter((p) => p.reviewed_at).map((p) => new Option(
+      `${p.area === "acquisition" ? "Adquisición" : "Activación"} · ${p.audience.slice(0, 55)} · v${p.version}`, p.id,
+    )));
+}
+$("clip-area").addEventListener("change", () => { fillVersions(); applyPrompt(); });
+$("prompt-version").addEventListener("change", () => applyPrompt(false));
+for (const id of ["audience-context", "highlight-min", "highlight-max", "prior-learning", "audience-channel", "campaign-context"]) {
+  $(id).addEventListener("input", () => {
+    invalidatePersonalization();
+    if (selectedRevision()) $("highlight-objective").value = selectedRevision().objective;
+  });
+}
+$("highlight-objective").addEventListener("input", () => {
+  if (promptVariant?.reviewed_at) promptVariant = null;
+  $("prompt-status").textContent = "Hay cambios sin guardar. Revisa y guarda la personalización para usarlos.";
+});
+$("personalization-history").addEventListener("change", () => {
+  const variant = personalizationHistory.find((p) => p.id === $("personalization-history").value);
+  if (!variant) return;
+  personalizationRequest++;
+  $("clip-area").value = variant.area;
+  fillVersions(variant.master.version);
+  $("audience-context").value = variant.audience;
+  $("highlight-min").value = variant.min_seconds;
+  $("highlight-max").value = variant.max_seconds;
+  $("prior-learning").value = variant.prior_learning;
+  $("audience-channel").value = variant.channel;
+  $("campaign-context").value = variant.campaign_context || "";
+  showVariant(variant);
+  highlightFormDirty = true;
+});
+$("adapt-prompt").addEventListener("click", async () => {
+  if (!$("highlights-form").reportValidity()) return;
+  const inputs = adaptationInputs();
+  if (inputs.audience.length < 3) { notify("Describe la audiencia para adaptar el prompt."); return; }
+  if (inputs.min_seconds > inputs.max_seconds) { notify("Revisa el rango de duración."); return; }
+  const request = ++personalizationRequest, fingerprint = inputFingerprint(), jobId = state.active;
+  personalizationBusy = true;
+  $("adapt-prompt").disabled = true;
+  $("prompt-status").textContent = "Preparando una propuesta con los antecedentes relevantes…";
+  const job = state.jobs.find((j) => j.id === state.active); if (job) renderHighlightState(job);
+  try {
+    const draft = await api("/api/personalizations", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(inputs),
+    });
+    if (request !== personalizationRequest || fingerprint !== inputFingerprint() || jobId !== state.active) return;
+    fillVersions(draft.master.version);
+    showVariant(draft);
+  } catch (error) { if (request === personalizationRequest) { $("prompt-status").textContent = error.message; notify(error.message); } }
+  finally {
+    personalizationBusy = false;
+    $("adapt-prompt").disabled = false;
+    const job = state.jobs.find((j) => j.id === state.active); if (job) renderHighlightState(job);
+  }
+});
+$("save-prompt").addEventListener("click", async () => {
+  if (!$("highlights-form").reportValidity()) return;
+  const inputs = adaptationInputs(), objective = $("highlight-objective").value.trim();
+  if (inputs.audience.length < 3) { notify("Describe la audiencia para guardar una personalización."); return; }
+  const fingerprint = inputFingerprint(), jobId = state.active;
+  $("save-prompt").disabled = true;
+  try {
+    const saved = await api(promptVariant && !promptVariant.reviewed_at
+      ? `/api/personalizations/${promptVariant.id}/approve` : "/api/personalizations/manual", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(promptVariant && !promptVariant.reviewed_at ? {objective} : {...inputs, objective}),
+    });
+    if (fingerprint !== inputFingerprint() || jobId !== state.active) return;
+    showVariant(saved);
+    await loadPersonalizationHistory();
+    $("personalization-history").value = saved.id;
+    notify("Personalización guardada y lista para usar.");
+  } catch (error) { notify(error.message); }
+  finally { $("save-prompt").disabled = false; }
+});
+$("publish-master").addEventListener("click", async () => {
+  if (!$("highlights-form").reportValidity() || !selectedRevision()) return;
+  try {
+    const saved = await api(`/api/prompts/${selectedPrompt().id}/revisions`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({base_version: Number($("prompt-version").value), objective: $("highlight-objective").value.trim(),
+        min_seconds: Number($("highlight-min").value), max_seconds: Number($("highlight-max").value)}),
+    });
+    promptCatalog = promptCatalog.map((p) => p.id === saved.id ? saved : p);
+    fillVersions(); applyPrompt(false); notify("Nueva versión del maestro guardada.");
+  } catch (error) { notify(error.message); }
+});
 
 function resetHighlights() {
   highlightData = null;
   highlightRequest = null;
   highlightedSegmentIds = new Set();
   highlightEnd = null;
+  invalidatePersonalization();
+  $("prompt-manager").open = false;
+  $("prior-learning").value = "";
+  $("audience-channel").value = "";
+  $("campaign-context").value = "";
   $("highlight-results").hidden = true;
   $("highlight-error").hidden = true;
   $("highlight-progress").hidden = true;
 }
 function fillHighlightOptions(options) {
+  if (!promptCatalog.length) {
+    pendingHighlightOptions = options;
+    $("clip-area").value = options.prompt_id?.startsWith("activation") ? "activation" : "acquisition";
+    $("audience-context").value = options.audience_context || "";
+    $("campaign-context").value = options.campaign_context || "";
+    $("highlight-count").value = options.max_count;
+    $("highlight-min").value = options.min_seconds;
+    $("highlight-max").value = options.max_seconds;
+    return;
+  }
+  const profile = promptCatalog.find((p) => p.id === options.prompt_id);
+  const area = profile?.area || (options.prompt_id?.startsWith("activation") ? "activation" : "acquisition");
+  $("clip-area").value = area;
+  fillVersions(options.personalization_id && profile?.status === "master" ? options.prompt_version : null);
+  applyPrompt();
+  $("audience-context").value = options.audience_context || "";
+  $("campaign-context").value = options.campaign_context || "";
   $("highlight-count").value = options.max_count;
-  $("highlight-min").value = options.min_seconds;
-  $("highlight-max").value = options.max_seconds;
-  $("highlight-objective").value = options.objective;
+  if (options.prompt_id) {
+    $("highlight-min").value = options.min_seconds;
+    $("highlight-max").value = options.max_seconds;
+  }
+  if (options.personalization_id) {
+    const job = state.jobs.find((j) => j.id === state.active);
+    const variant = job?.highlights_prompt?.personalization;
+    if (variant) {
+      $("prior-learning").value = variant.prior_learning;
+      $("audience-channel").value = variant.channel;
+      showVariant(variant);
+    }
+  }
 }
 async function refreshLLMSettings() {
   try {
+    const firstCatalogRead = !promptCatalog.length;
     llmSettings = await api("/api/settings");
+    try {
+      promptCatalog = await api("/api/prompts");
+    } catch {
+      $("prompt-status").textContent = "No se pudo cargar el catálogo de perfiles. Reinicia el servidor y recarga la página; si continúa, revisa la conexión local.";
+      throw new Error("Prompt catalog unavailable");
+    }
     settingsLastRead = Date.now();
-    if (!highlightFormDirty) fillHighlightOptions(llmSettings.highlights);
+    if (pendingHighlightOptions) {
+      const pending = pendingHighlightOptions;
+      pendingHighlightOptions = null;
+      fillHighlightOptions(pending);
+    } else if (!highlightFormDirty) {
+      fillHighlightOptions(llmSettings.highlights);
+      highlightFormDirty = false;
+    } else if (firstCatalogRead) {
+      const job = state.jobs.find((j) => j.id === state.active);
+      if (job?.highlights_options?.prompt_id && !$("audience-context").value) {
+        fillHighlightOptions(job.highlights_options);
+      } else if ($("clip-area").value) {
+        fillVersions();
+        applyPrompt();
+      }
+    }
     const notice = $("llm-config-notice");
     notice.replaceChildren();
     notice.classList.toggle("ready", llmSettings.llm.configured);
@@ -615,10 +854,12 @@ function renderHighlightState(job) {
   if (job.status !== "completed") return;
   const busy = ["queued", "running"].includes(job.highlights_status);
   const renderingClips = ["queued", "running"].includes(job.clips_status);
-  for (const field of $("highlights-form").querySelectorAll("input, textarea"))
+  for (const field of $("highlights-form").querySelectorAll("input, textarea, select, button"))
     field.disabled = busy;
+  $("prompt-version").disabled = busy || !selectedPrompt();
+  $("adapt-prompt").disabled = busy || personalizationBusy || !llmSettings?.llm.configured;
   $("generate-highlights").disabled =
-    busy || renderingClips || !llmSettings?.llm.configured;
+    busy || renderingClips || personalizationBusy || !selectedPrompt() || !llmSettings?.llm.configured;
   const buttonText = busy
     ? "Selecting passages…"
     : job.highlights_status === "completed"
@@ -658,7 +899,7 @@ function renderHighlights(data) {
   $("highlight-results-title").textContent =
     `${data.highlights.length} selected passage${data.highlights.length === 1 ? "" : "s"}`;
   $("highlight-result-meta").textContent =
-    `${data.model} · ranked by editorial importance · ${data.usage.requests} API request${data.usage.requests === 1 ? "" : "s"}`;
+    `${data.model}${data.prompt ? ` · ${data.prompt.name} v${data.prompt.version}` : ""} · ranked by editorial importance · ${data.usage.requests} API request${data.usage.requests === 1 ? "" : "s"}`;
   $("highlight-summary").textContent = data.summary;
   $("highlight-export-html").href =
     `/api/jobs/${data.job_id}/highlights/export/html`;
@@ -716,10 +957,108 @@ function renderHighlights(data) {
     list.append(card);
   }
   markHighlightedSegments();
+  attachResultForms(data);
   attachClipPreviews();
   const current = state.jobs.find((j) => j.id === state.active);
   if (current) renderClipState(current);
 }
+
+async function attachResultForms(data) {
+  const version = loadVersion;
+  try {
+    const context = await api(`/api/jobs/${data.job_id}/results`);
+    if (version !== loadVersion || highlightData !== data || context.selection_created_at !== (data.created_at || null)) return;
+    for (const clip of data.highlights) {
+      const card = document.querySelector(`[data-highlight-id="${clip.id}"]`);
+      if (!card) continue;
+      card.querySelector(".clip-feedback")?.remove();
+      const details = document.createElement("details"); details.className = "clip-feedback";
+      const summary = document.createElement("summary"); summary.textContent = "Registrar publicación y resultado";
+      const form = document.createElement("form");
+      const fields = {};
+      function field(name, labelText, type = "text", choices = null) {
+        const label = document.createElement("label"); label.textContent = labelText;
+        const input = document.createElement(choices ? "select" : type === "textarea" ? "textarea" : "input");
+        if (choices) for (const [value, text] of choices) input.append(new Option(text, value));
+        else if (type !== "textarea") input.type = type;
+        input.name = name;
+        if (type === "number") { input.min = "0"; input.step = "any"; }
+        if (type === "text" || type === "textarea") input.maxLength = name === "channel" ? 100 : 4000;
+        label.append(input); form.append(label); fields[name] = input;
+        return input;
+      }
+      field("area", "Objetivo", "text", [["acquisition", "Adquisición · nuevos clientes"], ["activation", "Activación · mayor interacción"]]).value = data.prompt?.area || "acquisition";
+      field("audience", "Audiencia de esta publicación").value = data.options.audience_context || "";
+      field("channel", "Canal").value = data.prompt?.personalization?.channel || "";
+      const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
+      field("published_at", "Fecha de publicación", "date").value = today.toISOString().slice(0, 10);
+      for (const name of ["audience", "channel", "published_at"]) fields[name].required = true;
+      fields.audience.minLength = 3;
+      field("evaluation", "Resultado", "text", [["pending", "Publicado · aún sin evaluar"], ["successful", "Funcionó"], ["unsuccessful", "No funcionó"], ["mixed", "Resultado mixto"]]);
+      field("evidence_source", "Origen del resultado", "text", [["user_report", "Observación del usuario"], ["measured", "Métricas registradas"], ["synthetic", "Hipótesis de audiencia sintética"]]);
+      field("views", "Reproducciones (opcional)", "number");
+      field("interactions", "Interacciones (opcional)", "number");
+      field("inquiries", "Consultas de clientes (opcional)", "number");
+      field("feedback", "¿Qué funcionó o qué falló? (opcional)", "textarea");
+      const save = document.createElement("button"); save.type = "submit"; save.className = "secondary-button"; save.textContent = "Guardar resultado de esta publicación";
+      const status = document.createElement("p"); status.className = "prompt-help"; status.setAttribute("role", "status");
+      form.append(save, status);
+      const history = document.createElement("div"); history.className = "prompt-help";
+      const records = context.records.filter((r) => r.clip_id === clip.id && r.selection_revision === context.selection_revision);
+      let editingResultId = null;
+      function showResult(record) {
+        const row = document.createElement("p");
+        const labels = {pending: "Sin evaluar", successful: "Funcionó", unsuccessful: "No funcionó", mixed: "Mixto"};
+        row.textContent = `${record.published_at} · ${record.channel} · ${record.audience} · ${labels[record.evaluation]}${record.evidence_source === "synthetic" ? " · Hipótesis sintética" : ""}\n${record.feedback || ""}\n${metricsText(record.metrics)}`;
+        row.dataset.resultId = record.id;
+        const edit = document.createElement("button"); edit.type = "button"; edit.className = "secondary-button";
+        edit.textContent = "Editar o evaluar publicación";
+        edit.addEventListener("click", () => {
+          editingResultId = record.id;
+          for (const key of ["area", "audience", "channel", "published_at", "evaluation", "evidence_source", "feedback"]) fields[key].value = record[key] || "";
+          for (const key of ["views", "interactions", "inquiries"]) fields[key].value = record.metrics?.[key] ?? "";
+          save.textContent = "Actualizar resultado de esta publicación";
+        });
+        row.append(edit);
+        history.querySelector(`[data-result-id="${record.id}"]`)?.remove();
+        history.prepend(row);
+      }
+      for (const record of records.filter((r) => r.stage !== "selected").reverse()) showResult(record);
+      const count = document.createElement("p"); count.className = "prompt-help";
+      count.textContent = "Selección guardada. Cada publicación puede tener su propio registro; seleccionar un clip no demuestra éxito.";
+      const exportLink = document.createElement("a"); exportLink.href = `/api/jobs/${data.job_id}/results/export`; exportLink.textContent = "Exportar historial del video (JSON)";
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault(); save.disabled = true;
+        const metrics = {};
+        for (const key of ["views", "interactions", "inquiries"]) if (fields[key].value !== "") metrics[key] = Number(fields[key].value);
+        const body = {selection_revision: context.selection_revision, metrics};
+        for (const key of ["area", "audience", "channel", "published_at", "evaluation", "evidence_source", "feedback"]) body[key] = fields[key].value.trim();
+        body.stage = body.evaluation === "pending" ? "published" : "evaluated";
+        try {
+          const result = await api(`/api/jobs/${data.job_id}/clips/${clip.id}/results${editingResultId ? `/${editingResultId}` : ""}`, {
+            method: editingResultId ? "PUT" : "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+          });
+          if (version !== loadVersion || highlightData !== data) return;
+          showResult(result); status.textContent = "Resultado guardado para futuras personalizaciones.";
+          for (const key of ["feedback", "views", "interactions", "inquiries"]) fields[key].value = "";
+          fields.evaluation.value = "pending";
+          editingResultId = null; save.textContent = "Guardar resultado de esta publicación";
+        } catch (error) { status.textContent = error.message; }
+        finally { save.disabled = false; }
+      });
+      details.append(summary, count, history, form, exportLink); card.append(details);
+    }
+    const old = context.records.filter((r) => r.stage !== "selected" && r.selection_revision !== context.selection_revision);
+    document.querySelector(".previous-results")?.remove();
+    if (old.length) {
+      const history = document.createElement("details"); history.className = "previous-results clip-feedback";
+      const summary = document.createElement("summary"); summary.textContent = "Resultados de selecciones anteriores"; history.append(summary);
+      for (const r of old) { const row = document.createElement("p"); row.textContent = `${r.clip.title} · ${r.audience} · ${r.channel} · ${r.published_at} · ${r.evaluation} · ${r.feedback}`; history.append(row); }
+      $("highlight-cards").append(history);
+    }
+  } catch (error) { if (version === loadVersion) notify(`No se pudo cargar el historial de resultados: ${error.message}`); }
+}
+
 function markHighlightedSegments() {
   for (const row of document.querySelectorAll(".transcript-segment"))
     row.classList.toggle(
@@ -746,11 +1085,24 @@ $("highlights-form").addEventListener("submit", async (e) => {
   const id = state.active;
   const version = loadVersion;
   const options = {
+    prompt_id: selectedPrompt()?.id || null,
+    prompt_version: selectedPrompt() ? Number($("prompt-version").value) : null,
+    personalization_id: promptVariant?.reviewed_at ? promptVariant.id : null,
+    audience_kind: "unspecified",
+    campaign_context: $("campaign-context").value.trim(),
+    audience_context: $("audience-context").value.trim(),
     max_count: Number($("highlight-count").value),
     min_seconds: Number($("highlight-min").value),
     max_seconds: Number($("highlight-max").value),
     objective: $("highlight-objective").value.trim(),
   };
+  const revision = selectedRevision();
+  if ((promptVariant && !promptVariant.reviewed_at) ||
+      (!promptVariant && revision && options.objective !== revision.objective)) {
+    $("prompt-manager").open = true;
+    notify("Revisa y guarda la personalización antes de generar clips.");
+    return;
+  }
   if (options.min_seconds > options.max_seconds) {
     $("highlight-error").textContent =
       "Minimum duration must not exceed maximum duration.";
@@ -779,6 +1131,7 @@ $("highlights-form").addEventListener("submit", async (e) => {
   }
 });
 refreshLLMSettings();
+loadPersonalizationHistory().catch(() => {});
 
 let clipData = null;
 let clipLoadKey = null;

@@ -411,8 +411,8 @@
             <div class="highlights-heading-row">
               <div>
                 <span class="eyebrow">THE MOMENTS THAT MATTER</span>
-                <h2 id="highlights-heading">Find the important parts.</h2>
-                <p>Choose complete, useful passages from your transcript.</p>
+                <h2 id="highlights-heading">Encuentra los clips para tu audiencia.</h2>
+                <p>Elige el área, describe tu audiencia y ajusta la duración.</p>
               </div>
               <span id="llm-model-badge" class="llm-model-badge"></span>
             </div>
@@ -423,47 +423,52 @@
                 role="status"
               ></div>
               <form id="highlights-form">
-                <div class="highlight-options">
-                  <label for="highlight-count"
-                    >Up to<input
-                      id="highlight-count"
-                      type="number"
-                      min="1"
-                      max="15"
-                      value="5"
-                      required
-                    /><span>highlights</span></label
-                  >
-                  <label for="highlight-min"
-                    >Minimum<input
-                      id="highlight-min"
-                      type="number"
-                      min="1"
-                      max="300"
-                      value="20"
-                      required
-                    /><span>seconds</span></label
-                  >
-                  <label for="highlight-max"
-                    >Maximum<input
-                      id="highlight-max"
-                      type="number"
-                      min="5"
-                      max="600"
-                      value="90"
-                      required
-                    /><span>seconds</span></label
-                  >
+                <div class="prompt-selectors">
+                  <label for="clip-area">Área
+                    <select id="clip-area">
+                      <option value="acquisition">Adquisición · nuevos clientes</option>
+                      <option value="activation">Activación · clientes actuales</option>
+                    </select>
+                  </label>
                 </div>
-                <label class="highlight-objective" for="highlight-objective"
-                  >What should we look for?<textarea
-                    id="highlight-objective"
-                    rows="3"
-                    minlength="10"
-                    maxlength="2000"
-                    required
-                  ></textarea>
+                <label class="highlight-objective" for="audience-context">Describe tu audiencia
+                  <textarea id="audience-context" rows="3" maxlength="4000" placeholder="Quiénes son, qué buscan, qué conocen y qué les impide actuar"></textarea>
                 </label>
+                <div class="highlight-options duration-options">
+                  <label for="highlight-min">Duración mínima<input id="highlight-min" type="number" min="1" max="300" value="15" required /><span>segundos</span></label>
+                  <label for="highlight-max">Duración máxima<input id="highlight-max" type="number" min="5" max="600" value="60" required /><span>segundos</span></label>
+                </div>
+                <details id="prompt-manager" class="personalization-panel">
+                  <summary>Revisar personalización</summary>
+                  <p id="prompt-status" class="prompt-help" role="status">Se usará el prompt maestro del área y el contexto de audiencia.</p>
+                  <label class="highlight-objective" for="campaign-context">Acción objetivo o contexto de campaña (opcional)
+                    <textarea id="campaign-context" rows="2" maxlength="4000" placeholder="En activación: barrera o siguiente paso que quieres abordar. Si está vacío, se usará la acción que respalde el contenido."></textarea>
+                  </label>
+                  <label class="highlight-objective" for="prior-learning">¿Qué ha funcionado con esta audiencia? (opcional)
+                    <textarea id="prior-learning" rows="2" maxlength="4000" placeholder="Por ejemplo: explicaciones directas y ejemplos cotidianos; los mensajes comerciales generan poca interacción"></textarea>
+                  </label>
+                  <label class="highlight-objective" for="audience-channel">Canal de publicación (opcional)
+                    <input id="audience-channel" maxlength="100" placeholder="Instagram, TikTok, correo…" />
+                  </label>
+                  <button id="adapt-prompt" type="button" class="secondary-button">Proponer adaptación con IA</button>
+                  <p class="prompt-help">La adaptación envía el contexto y los antecedentes relevantes al modelo configurado. La descripción de audiencia es contexto; no ejecuta una simulación.</p>
+                  <details class="prompt-help"><summary>Ver prompt maestro</summary><pre id="master-prompt"></pre></details>
+                  <p class="prompt-help">La transcripción y el contexto de campaña se incorporan automáticamente al seleccionar el contenido.</p>
+                  <label class="highlight-objective" for="highlight-objective">Prompt que se utilizará
+                    <textarea id="highlight-objective" rows="7" minlength="10" maxlength="12000" required></textarea>
+                  </label>
+                  <div id="prompt-explanation" class="prompt-help"></div>
+                  <div id="prompt-evidence" class="prompt-help"></div>
+                  <button id="save-prompt" type="button" class="secondary-button">Guardar y usar personalización</button>
+                  <label class="highlight-objective" for="personalization-history">Personalizaciones guardadas
+                    <select id="personalization-history"><option value="">Selecciona una versión revisada</option></select>
+                  </label>
+                  <details class="prompt-help"><summary>Opciones avanzadas del maestro</summary>
+                    <label for="prompt-version">Versión del maestro<select id="prompt-version"></select></label>
+                    <label for="highlight-count">Máximo de clips<input id="highlight-count" type="number" min="1" max="15" value="5" required /></label>
+                    <button id="publish-master" type="button" class="secondary-button">Guardar este prompt como nueva versión del maestro</button>
+                  </details>
+                </details>
                 <div class="highlight-action-row">
                   <p>
                     Transcript text is sent to OpenAI when you generate
